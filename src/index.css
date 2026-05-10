@@ -1,0 +1,190 @@
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;0,700;1,300;1,400;1,500&family=Jost:wght@200;300;400;500;600;700&display=swap');
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  /* Leela brand color utilities */
+  --color-leela-navy: var(--leela-navy);
+  --color-leela-gray: var(--leela-gray);
+  --color-leela-white: var(--leela-white);
+  --color-leela-ivory: var(--leela-ivory);
+  --color-leela-cream: var(--leela-cream);
+  --color-leela-gold: var(--leela-gold);
+  --color-leela-charcoal: var(--leela-charcoal);
+  --color-leela-muted: var(--leela-muted);
+
+  /* Leela typography */
+  --font-display: 'Cormorant Garamond', serif;
+  --font-sans: 'Jost', sans-serif;
+}
+
+/*
+  ============================================================
+  THEME CONFIGURATION
+  ============================================================
+
+  Theme: neutral (default)
+  Mode:  light (:root) / dark (.dark)
+
+  To switch to dark mode by default, change the ThemeProvider
+  defaultTheme prop in src/main.tsx:
+    <ThemeProvider defaultTheme="dark">
+
+  To change theme colors, replace the OKLCH values below.
+  Visit https://ui.shadcn.com/themes to generate theme CSS.
+
+  To change the base color palette (e.g. stone, zinc, gray),
+  re-initialize with the shadcn CLI:
+    npx shadcn@latest init -t vite --preset nova -y -f
+    npx shadcn@latest init -t vite --preset vega -y -f
+
+  Available presets: nova, vega, maia, lyra, mira
+  Available base colors: neutral, stone, zinc, gray, mauve,
+                         olive, mist, taupe
+
+  CLI non-interactive theme change:
+    npx shadcn@latest init -t vite -d -y -f
+  ============================================================
+*/
+
+:root {
+  --radius: 0.5rem;
+
+  /* ===== LEELA BRAND COLORS ===== */
+  --leela-navy: #21469F;
+  --leela-gray: #666666;
+  --leela-white: #FFFFFF;
+  --leela-ivory: #F8F5F0;
+  --leela-cream: #EDE8DF;
+  --leela-gold: #C9A84C;
+  --leela-charcoal: #1A1A2E;
+  --leela-muted: #8A8A8A;
+
+  /* ===== SHADCN TOKEN MAPPING ===== */
+  --background: #F8F5F0;
+  --foreground: #1A1A2E;
+  --card: #FFFFFF;
+  --card-foreground: #1A1A2E;
+  --popover: #FFFFFF;
+  --popover-foreground: #1A1A2E;
+  --primary: #21469F;
+  --primary-foreground: #FFFFFF;
+  --secondary: #EDE8DF;
+  --secondary-foreground: #1A1A2E;
+  --muted: #EDE8DF;
+  --muted-foreground: #8A8A8A;
+  --accent: #EDE8DF;
+  --accent-foreground: #21469F;
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: #FFFFFF;
+  --border: #EDE8DF;
+  --input: #EDE8DF;
+  --ring: #21469F;
+  --chart-1: #21469F;
+  --chart-2: #C9A84C;
+  --chart-3: #1A1A2E;
+  --chart-4: #666666;
+  --chart-5: #EDE8DF;
+  --sidebar: #1A1A2E;
+  --sidebar-foreground: #F8F5F0;
+  --sidebar-primary: #21469F;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #21469F;
+  --sidebar-accent-foreground: #FFFFFF;
+  --sidebar-border: rgba(255,255,255,0.1);
+  --sidebar-ring: #C9A84C;
+}
+
+/* LIP is a light-only brand experience — no dark mode */
+
+@layer base {
+  * {
+    @apply border-border;
+    box-sizing: border-box;
+  }
+  html {
+    font-family: 'Jost', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Jost', sans-serif;
+    margin: 0;
+    padding: 0;
+  }
+}
+
+/* ===== LEELA CUSTOM UTILITIES ===== */
+
+/* Thin gold accent line at very top */
+.leela-gold-line {
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    #C9A84C 15%,
+    #C9A84C 85%,
+    transparent 100%
+  );
+}
+
+/* Custom scrollbar */
+.leela-scroll::-webkit-scrollbar { width: 4px; }
+.leela-scroll::-webkit-scrollbar-track { background: #F8F5F0; }
+.leela-scroll::-webkit-scrollbar-thumb { background: #EDE8DF; border-radius: 2px; }
+.leela-scroll::-webkit-scrollbar-thumb:hover { background: #C9A84C; }
+
+/* Typing dots animation */
+@keyframes typing-bounce {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+.typing-dot {
+  animation: typing-bounce 1.4s infinite ease-in-out;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+/* Font utilities */
+.font-display { font-family: 'Cormorant Garamond', serif; }
+.font-body { font-family: 'Jost', sans-serif; }
