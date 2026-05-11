@@ -19,6 +19,19 @@ export function MessageBubble({ message }: MessageBubbleProps) {
     });
   };
 
+  const speakText = (text: string) => {
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 0.9;
+    utterance.pitch = 1.0;
+    utterance.lang = 'en-IN';
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const stopSpeech = () => {
+    window.speechSynthesis.cancel();
+  };
+
   // Convert markdown-like **bold** and line breaks to JSX
   const renderContent = (text: string) => {
     const lines = text.split('\n');
@@ -127,12 +140,32 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           </div>
         )}
 
-        <p
-          className="mt-1 text-xs"
-          style={{ color: '#8A8A8A', fontFamily: "'Jost', sans-serif" }}
-        >
-          {formatTime(message.timestamp)}
-        </p>
+        <div className="flex items-center gap-2 mt-1">
+          <p
+            className="text-xs"
+            style={{ color: '#8A8A8A', fontFamily: "'Jost', sans-serif" }}
+          >
+            {formatTime(message.timestamp)}
+          </p>
+          {!message.isStreaming && (
+            <>
+              <button
+                onClick={() => speakText(message.content)}
+                style={{ color: '#8A8A8A', background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontSize: '0.8rem' }}
+                title="Read aloud"
+              >
+                🔊
+              </button>
+              <button
+                onClick={stopSpeech}
+                style={{ color: '#8A8A8A', background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontSize: '0.8rem' }}
+                title="Stop"
+              >
+                ⏹
+              </button>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
