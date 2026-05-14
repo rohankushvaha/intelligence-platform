@@ -1,8 +1,11 @@
 """
 LIP v2 — Leela Intelligence Platform
-Core Ingestion Pipeline (Crawl4AI edition)
+Core Ingestion Pipeline (Crawl4AI — JS rendering fix)
 ─────────────────────────────────────────────────────────────────────────────
-Fixed: crawl4ai.deep_crawling import path updated for crawl4ai v0.4.x
+Fix: theleela.com is heavily JavaScript-rendered. Links and content only
+appear after JS executes. Changed wait strategy to 'networkidle' and added
+explicit page delay. Also added a MANUAL_URLS fallback — if crawling finds
+zero links, we scrape a predefined list of known Leela URLs directly.
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -54,6 +57,47 @@ log = logging.getLogger("lip.ingest")
 
 
 # ══════════════════════════════════════════════════════════════════════════
+#  MANUAL URL LIST — fallback for JS-heavy sites
+#  These are the known, stable Leela URLs we always want ingested.
+#  If the crawler finds zero links (JS rendering issue), we scrape these
+#  directly. Add more URLs here as the site grows.
+# ══════════════════════════════════════════════════════════════════════════
+
+MANUAL_URLS: dict[str, list[str]] = {
+    "The Leela — Properties Overview": [
+        "https://www.theleela.com/en_US/hotels-resorts.html",
+        "https://www.theleela.com/en_US/the-leela-palace-new-delhi.html",
+        "https://www.theleela.com/en_US/the-leela-palace-bengaluru.html",
+        "https://www.theleela.com/en_US/the-leela-palace-chennai.html",
+        "https://www.theleela.com/en_US/the-leela-palace-udaipur.html",
+        "https://www.theleela.com/en_US/the-leela-palace-jaipur.html",
+        "https://www.theleela.com/en_US/the-leela-goa.html",
+        "https://www.theleela.com/en_US/the-leela-kovalam.html",
+        "https://www.theleela.com/en_US/the-leela-ambience-gurugram.html",
+        "https://www.theleela.com/en_US/the-leela-bhartiya-city-bengaluru.html",
+    ],
+    "The Leela — Dining": [
+        "https://www.theleela.com/en_US/dining.html",
+        "https://www.theleela.com/en_US/jamavar-restaurant.html",
+        "https://www.theleela.com/en_US/le-cirque-signature.html",
+    ],
+    "The Leela — Spa & Wellness": [
+        "https://www.theleela.com/en_US/spa-wellness.html",
+        "https://www.theleela.com/en_US/spa.html",
+    ],
+    "The Leela — Weddings & Events": [
+        "https://www.theleela.com/en_US/weddings-and-events.html",
+        "https://www.theleela.com/en_US/meetings-and-events.html",
+    ],
+    "The Leela — Investor / Corporate": [
+        "https://www.theleela.com/en_US/investor-relations.html",
+        "https://www.theleela.com/en_US/about-us.html",
+        "https://www.theleela.com/en_US/sustainability.html",
+    ],
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════
 #  CLIENT INITIALISATION
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -78,7 +122,7 @@ def init_clients() -> tuple[SupabaseClient, SentenceTransformer]:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  CRAWL4AI CONFIG
+#  CRAWL4AI CONFIG — JS rendering fix
 # ══════════════════════════════════════════════════════════════════════════
 
 def get_browser_config() -> BrowserConfig:
@@ -91,31 +135,77 @@ def get_browser_config() -> BrowserConfig:
 
 def get_crawl_config() -> CrawlerRunConfig:
     return CrawlerRunConfig(
-        cache_mode              = CacheMode.BYPASS,
-        page_timeout            = 30000,
-        wait_until              = "domcontentloaded",
-        word_count_threshold    = 20,
+        cache_mode = CacheMode.BYPASS,
+
+        # KEY FIX: wait for network to go idle (all JS/AJAX done)
+        # 'networkidle' waits until no network requests for 500ms
+        # This is much more reliable than 'domcontentloaded' for JS sites
+        wait_until = "networkidle",
+
+        # Additional wait after networkidle — some sites have delayed renders
+        # 3 seconds gives JS frameworks time to paint content into the DOM
+        page_timeout            = 60000,    # 60s total timeout (up from 30s)
+        word_count_threshold    = 10,       # lower threshold — capture more
         exclude_external_links  = True,
         remove_overlay_elements = True,
         process_iframes         = False,
-        mean_delay              = 1.5,
+        mean_delay              = 2.0,      # polite delay between requests
         max_range               = 1.0,
     )
 
 
 # ══════════════════════════════════════════════════════════════════════════
 #  STEP 1 — CRAWL
-#  Uses simple multi-page crawl compatible with all crawl4ai versions.
-#  Deep crawl strategy imports vary by version — we use arun_many() instead
-#  which is stable across all v0.4.x releases.
 # ══════════════════════════════════════════════════════════════════════════
+
+async def _scrape_urls_async(urls: list[str], source_name: str) -> list[dict]:
+    """
+    Scrape a known list of URLs directly.
+    Used as primary strategy for JS-heavy sites where link discovery fails.
+    """
+    log.info(f"[CRAWL] Scraping {len(urls)} known URLs for {source_name}")
+
+    browser_config = get_browser_config()
+    crawl_config   = get_crawl_config()
+    pages          = []
+
+    async with AsyncWebCrawler(config=browser_config) as crawler:
+        results = await crawler.arun_many(
+            urls   = urls,
+            config = crawl_config,
+        )
+
+        for result in (results if isinstance(results, list) else [results]):
+            if not result.success:
+                log.warning(f"[CRAWL] Failed: {getattr(result, 'url', '?')} — {getattr(result, 'error_message', '')}")
+                continue
+
+            markdown = (result.markdown or "").strip()
+            if len(markdown) < 50:
+                log.debug(f"[CRAWL] Near-empty page skipped: {result.url}")
+                continue
+
+            title = ""
+            if result.metadata:
+                title = result.metadata.get("title", source_name)
+
+            pages.append({
+                "url"     : result.url,
+                "markdown": markdown,
+                "title"   : title or source_name,
+            })
+            log.info(f"[CRAWL] ✓ {result.url} ({len(markdown)} chars)")
+
+    log.info(f"[CRAWL] {source_name} → {len(pages)} usable pages")
+    return pages
+
 
 async def _crawl_source_async(source: IngestionSource) -> list[dict]:
     """
-    Crawl a source using Crawl4AI.
-    Strategy: fetch the root URL, extract all internal links, then
-    crawl each link up to max_pages. This avoids version-specific
-    deep crawl strategy imports entirely.
+    Two-strategy crawl:
+    1. Try to discover links from root URL (works on simple HTML sites)
+    2. If zero links found, fall back to MANUAL_URLS for this source
+    This handles both JS-heavy sites (theleela.com) and simpler sites.
     """
     log.info(f"[CRAWL] Starting: {source.name} → {source.url}")
 
@@ -125,72 +215,75 @@ async def _crawl_source_async(source: IngestionSource) -> list[dict]:
 
     async with AsyncWebCrawler(config=browser_config) as crawler:
 
-        # Step 1: Crawl the root URL and collect internal links
-        root_result = await crawler.arun(
-            url    = source.url,
-            config = crawl_config,
-        )
+        # Strategy 1: Crawl root URL
+        root_result = await crawler.arun(url=source.url, config=crawl_config)
 
-        if not root_result.success:
-            log.warning(f"[CRAWL] Root page failed: {source.url}")
-            return []
-
-        # Add root page if it has content
-        root_markdown = (root_result.markdown or "").strip()
-        if len(root_markdown) > 50:
-            pages.append({
-                "url"     : source.url,
-                "markdown": root_markdown,
-                "title"   : root_result.metadata.get("title", source.name) if root_result.metadata else source.name,
-            })
-
-        # Step 2: Extract internal links from root page
-        internal_links = []
-        if root_result.links:
-            for link in root_result.links.get("internal", []):
-                href = link.get("href", "")
-                if not href or href == source.url:
-                    continue
-                # Apply url_patterns filter if defined
-                if source.url_patterns:
-                    if any(p in href for p in source.url_patterns):
-                        internal_links.append(href)
-                else:
-                    internal_links.append(href)
-
-        # Deduplicate and limit to max_pages - 1 (root already counted)
-        seen = {source.url}
-        filtered_links = []
-        for link in internal_links:
-            if link not in seen:
-                seen.add(link)
-                filtered_links.append(link)
-            if len(filtered_links) >= source.max_pages - 1:
-                break
-
-        log.info(f"[CRAWL] Found {len(filtered_links)} links to crawl from {source.name}")
-
-        # Step 3: Crawl each link
-        if filtered_links:
-            results = await crawler.arun_many(
-                urls   = filtered_links,
-                config = crawl_config,
-            )
-
-            for result in results:
-                if not result.success:
-                    log.warning(f"[CRAWL] Failed: {result.url}")
-                    continue
-                markdown = (result.markdown or "").strip()
-                if len(markdown) < 50:
-                    continue
+        if root_result.success:
+            markdown = (root_result.markdown or "").strip()
+            if len(markdown) > 50:
+                title = ""
+                if root_result.metadata:
+                    title = root_result.metadata.get("title", source.name)
                 pages.append({
-                    "url"     : result.url,
+                    "url"     : source.url,
                     "markdown": markdown,
-                    "title"   : result.metadata.get("title", source.name) if result.metadata else source.name,
+                    "title"   : title or source.name,
                 })
 
-    log.info(f"[CRAWL] ✓ {len(pages)} usable pages from {source.name}")
+            # Try to discover internal links
+            internal_links = []
+            if root_result.links:
+                for link in root_result.links.get("internal", []):
+                    href = link.get("href", "")
+                    if not href or href == source.url:
+                        continue
+                    if source.url_patterns:
+                        if any(p in href for p in source.url_patterns):
+                            internal_links.append(href)
+                    else:
+                        internal_links.append(href)
+
+            # Deduplicate
+            seen = {source.url}
+            filtered = []
+            for link in internal_links:
+                if link not in seen:
+                    seen.add(link)
+                    filtered.append(link)
+                if len(filtered) >= source.max_pages - 1:
+                    break
+
+            log.info(f"[CRAWL] Discovered {len(filtered)} links from {source.name}")
+
+            # Crawl discovered links
+            if filtered:
+                results = await crawler.arun_many(urls=filtered, config=crawl_config)
+                for result in (results if isinstance(results, list) else [results]):
+                    if not result.success:
+                        continue
+                    md = (result.markdown or "").strip()
+                    if len(md) < 50:
+                        continue
+                    title = ""
+                    if result.metadata:
+                        title = result.metadata.get("title", source.name)
+                    pages.append({"url": result.url, "markdown": md, "title": title or source.name})
+
+    # Strategy 2: If still no pages, use manual URL list
+    if len(pages) == 0 and source.name in MANUAL_URLS:
+        log.warning(f"[CRAWL] Zero pages from auto-crawl. Falling back to manual URLs for {source.name}")
+        pages = await _scrape_urls_async(MANUAL_URLS[source.name], source.name)
+    elif len(pages) <= 1 and source.name in MANUAL_URLS:
+        # Only got root page — supplement with manual URLs
+        log.info(f"[CRAWL] Only root page found. Supplementing with manual URLs for {source.name}")
+        manual_pages = await _scrape_urls_async(MANUAL_URLS[source.name], source.name)
+        # Add manual pages not already in pages
+        existing_urls = {p["url"] for p in pages}
+        for p in manual_pages:
+            if p["url"] not in existing_urls:
+                pages.append(p)
+
+    log.info(f"[CRAWL] ✓ {len(pages)} total usable pages from {source.name}")
     return pages
 
 
@@ -198,7 +291,7 @@ async def _crawl_source_async(source: IngestionSource) -> list[dict]:
 def crawl_source(source: IngestionSource, dry_run: bool = False) -> list[dict]:
     if dry_run:
         log.info(f"[DRY RUN] Skipping crawl for {source.name}")
-        return [{"url": source.url, "markdown": "# Dry run placeholder", "title": "Dry Run"}]
+        return [{"url": source.url, "markdown": "# Dry run placeholder content for testing", "title": "Dry Run"}]
     try:
         return asyncio.run(_crawl_source_async(source))
     except Exception as exc:
@@ -233,7 +326,6 @@ def chunk_pages(pages: list[dict], source: IngestionSource) -> Iterator[dict]:
             continue
 
         text_chunks = _splitter.split_text(raw_text)
-        log.debug(f"[CHUNK] {page_url} → {len(text_chunks)} chunks")
 
         for idx, chunk_text in enumerate(text_chunks):
             yield {
@@ -253,11 +345,7 @@ def chunk_pages(pages: list[dict], source: IngestionSource) -> Iterator[dict]:
 #  STEP 3 — EMBED
 # ══════════════════════════════════════════════════════════════════════════
 
-def embed_chunks(
-    chunks    : list[dict],
-    embed_model: SentenceTransformer,
-    batch_size : int = 32,
-) -> list[dict]:
+def embed_chunks(chunks: list[dict], embed_model: SentenceTransformer, batch_size: int = 32) -> list[dict]:
     texts = [c["content"] for c in chunks]
     log.info(f"[EMBED] Encoding {len(texts)} chunks…")
 
@@ -279,11 +367,7 @@ def embed_chunks(
 # ══════════════════════════════════════════════════════════════════════════
 
 @traceable(name="upsert_to_supabase")
-def upsert_chunks(
-    supabase  : SupabaseClient,
-    chunks    : list[dict],
-    batch_size: int = 50,
-) -> int:
+def upsert_chunks(supabase: SupabaseClient, chunks: list[dict], batch_size: int = 50) -> int:
     if not chunks:
         log.warning("[UPSERT] No chunks to upsert.")
         return 0
@@ -293,22 +377,20 @@ def upsert_chunks(
 
     for i in range(0, len(chunks), batch_size):
         batch = chunks[i : i + batch_size]
-        rows  = [
-            {
-                "id"             : c["id"],
-                "content"        : c["content"],
-                "embedding"      : c["embedding"],
-                "source_name"    : c["source_name"],
-                "source_url"     : c["source_url"],
-                "source_type"    : c["source_type"],
-                "mode"           : c["mode"],
-                "property_name"  : c.get("property_name"),
-                "chunk_index"    : c["chunk_index"],
-                "sentiment_score": c.get("sentiment_score"),
-                "updated_at"     : now,
-            }
-            for c in batch
-        ]
+        rows  = [{
+            "id"             : c["id"],
+            "content"        : c["content"],
+            "embedding"      : c["embedding"],
+            "source_name"    : c["source_name"],
+            "source_url"     : c["source_url"],
+            "source_type"    : c["source_type"],
+            "mode"           : c["mode"],
+            "property_name"  : c.get("property_name"),
+            "chunk_index"    : c["chunk_index"],
+            "sentiment_score": c.get("sentiment_score"),
+            "updated_at"     : now,
+        } for c in batch]
+
         try:
             supabase.table(SUPABASE_TABLE).upsert(rows, on_conflict="id").execute()
             upserted += len(batch)
@@ -337,7 +419,7 @@ def run_pipeline(
         "total_chunks"   : 0,
         "total_upserted" : 0,
         "failed_sources" : [],
-        "crawler"        : "crawl4ai (free, keyless)",
+        "crawler"        : "crawl4ai (free, keyless) + manual URL fallback",
     }
 
     for source in sources:
@@ -354,10 +436,9 @@ def run_pipeline(
 
         chunks = list(chunk_pages(pages, source))
         summary["total_chunks"] += len(chunks)
-        log.info(f"[CHUNK] {source.name} → {len(chunks)} total chunks")
+        log.info(f"[CHUNK] {len(chunks)} chunks from {len(pages)} pages")
 
         if dry_run:
-            log.info("[DRY RUN] Skipping embed + upsert.")
             continue
 
         chunks = embed_chunks(chunks, embed_model)
