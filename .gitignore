@@ -1,0 +1,48 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# LIP v2 — .gitignore
+# Covers: Python ingestion pipeline + React/Vite frontend
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── Credentials — NEVER commit these ────────────────────────────────────
+.env
+.env.local
+.env.production
+.env.*.local
+
+# ── Python ───────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── HuggingFace model cache ───────────────────────────────────────────────
+.cache/
+~/.cache/huggingface/
+*.bin
+*.safetensors
+*.pkl
+*.pt
+*.ckpt
+
+# ── Logs ─────────────────────────────────────────────────────────────────
+ingestion.log
+*.log
+
+# ── Node / React / Vite ──────────────────────────────────────────────────
+node_modules/
+dist/
+.vite/
+*.local
+
+# ── OS ───────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── IDE ──────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
