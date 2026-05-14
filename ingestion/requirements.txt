@@ -1,11 +1,12 @@
 # LIP v2 — Python Ingestion Pipeline Dependencies
 # Install: pip install -r requirements.txt
-#
 # Minimum Python version: 3.11
 # ─────────────────────────────────────────────────────────────────────────
 
-# Web crawling — Firecrawl handles JS rendering, bot detection, robots.txt
-firecrawl-py==1.9.0
+# Web crawling — Crawl4AI is 100% free, open source, no API key needed.
+# Outputs clean LLM-ready Markdown via Playwright browser automation.
+# After pip install, run once: crawl4ai-setup (installs Playwright browser)
+crawl4ai==0.4.247
 
 # LLM orchestration + text splitting
 langchain==0.3.25
@@ -14,7 +15,7 @@ langchain-community==0.3.23
 # Observability — LangSmith free tier: 5,000 traces/month
 langsmith==0.3.45
 
-# Embeddings — same model as v1 (384 dims, ~90MB)
+# Embeddings — same model as v1 (384 dims, ~90MB download, cached after)
 sentence-transformers==3.4.1
 
 # Supabase client — pgvector upsert + RPC calls
@@ -29,15 +30,14 @@ tiktoken==0.9.0
 # PDF text extraction — pypdf replaces deprecated PyPDF2
 pypdf==5.4.0
 
-# Sentiment analysis — runs locally, no API cost
+# Sentiment analysis — runs locally, no API cost (~480MB, cached after)
 transformers==4.51.3
 
-# CPU-only PyTorch — sufficient for inference, much smaller download than CUDA
-# If on Apple Silicon, pip will auto-select the MPS-compatible build
+# CPU-only PyTorch — sufficient for inference, no GPU needed
 torch==2.7.0
 
-# Progress bars for embedding batches
+# Progress bars
 tqdm==4.67.1
 
-# HTTP client used internally by several packages — pin for stability
+# HTTP client — pin for stability across packages
 httpx==0.28.1
