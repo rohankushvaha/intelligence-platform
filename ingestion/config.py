@@ -2,8 +2,11 @@
 LIP v2 — Leela Intelligence Platform
 Ingestion Pipeline Configuration
 ─────────────────────────────────────────────────────────────────────────────
-All environment variables, source definitions, and constants live here.
-Never hard-code credentials. Load them from a .env file (see .env.example).
+IMPORTANT: theleela.com migrated from /en_US/ URLs to clean URLs.
+Old: theleela.com/en_US/spa-wellness.html
+New: theleela.com/the-leela-palace-udaipur/experience/wellness
+
+All URLs updated to reflect current site structure (May 2026).
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -11,53 +14,18 @@ import os
 from dataclasses import dataclass, field
 from typing import Literal
 
-# ── Source type union ──────────────────────────────────────────────────────
 SourceType = Literal["official", "press", "competitive", "ugc"]
 Mode       = Literal["concierge", "investor", "internal"]
 
-# ── Supabase schema constants ──────────────────────────────────────────────
 SUPABASE_TABLE  = "documents"
-EMBEDDING_DIM   = 384           # all-MiniLM-L6-v2 output dimension (v1 parity)
-
-# ── Chunking parameters ────────────────────────────────────────────────────
-# Chosen to balance context richness vs. vector search precision.
-# 512 tokens ≈ 350-400 words — enough for one coherent idea about a property.
+EMBEDDING_DIM   = 384
 CHUNK_SIZE      = 512
-CHUNK_OVERLAP   = 64            # small overlap preserves sentence continuity
-
-# ── Firecrawl rate limiting ────────────────────────────────────────────────
-# Free tier: 500 credits one-time; refreshes 1,000/month on current free plan.
-# Scrape = 1 credit, AI extract = 5 credits.
-# We use plain scrape (markdown) only → 1 credit per page.
-# Set a conservative delay to avoid 429s on the free concurrency limit.
-FIRECRAWL_DELAY_SECONDS = 2.0   # pause between page scrapes
-
-# ── LangSmith observability ────────────────────────────────────────────────
-# Free Developer tier: 5,000 traces/month, 14-day retention, 1 seat.
-# Each ingest run counts as one trace. Well within limits for prototype use.
+CHUNK_OVERLAP   = 64
 LANGSMITH_PROJECT = "lip-v2-ingestion"
 
 
-# ══════════════════════════════════════════════════════════════════════════
-#  SOURCE REGISTRY
-#  Add or comment out sources here — the pipeline reads this list at runtime.
-# ══════════════════════════════════════════════════════════════════════════
-
 @dataclass
 class IngestionSource:
-    """
-    Defines one knowledge source to crawl and embed.
-
-    Fields
-    ------
-    name         : human-readable label stored in source_name column
-    url          : root URL to crawl
-    source_type  : tier classification (official / press / competitive / ugc)
-    mode         : which chat mode this content surfaces in
-    property_name: leave None for brand-wide content
-    max_pages    : hard cap to protect Firecrawl credits
-    url_patterns : if set, only crawl URLs matching these substrings
-    """
     name          : str
     url           : str
     source_type   : SourceType
@@ -72,48 +40,46 @@ SOURCES: list[IngestionSource] = [
     # ── TIER 1 — OFFICIAL ─────────────────────────────────────────────────
     IngestionSource(
         name         = "The Leela — Properties Overview",
-        url          = "https://www.theleela.com/en_US/hotels-resorts.html",
+        url          = "https://www.theleela.com",
         source_type  = "official",
         mode         = "concierge",
         max_pages    = 30,
-        url_patterns = ["hotels-resorts", "property", "palace", "resort"],
+        url_patterns = ["hotel", "palace", "resort", "property"],
     ),
     IngestionSource(
         name         = "The Leela — Dining",
-        url          = "https://www.theleela.com/en_US/dining.html",
+        url          = "https://www.theleela.com",
         source_type  = "official",
         mode         = "concierge",
         max_pages    = 20,
-        url_patterns = ["dining", "restaurant", "bar", "lounge"],
+        url_patterns = ["dining", "restaurant", "dine"],
     ),
     IngestionSource(
         name         = "The Leela — Spa & Wellness",
-        url          = "https://www.theleela.com/en_US/spa-wellness.html",
+        url          = "https://www.theleela.com",
         source_type  = "official",
         mode         = "concierge",
         max_pages    = 15,
-        url_patterns = ["spa", "wellness", "ayurveda"],
+        url_patterns = ["wellness", "spa"],
     ),
     IngestionSource(
         name         = "The Leela — Weddings & Events",
-        url          = "https://www.theleela.com/en_US/weddings-and-events.html",
+        url          = "https://www.theleela.com",
         source_type  = "official",
         mode         = "concierge",
         max_pages    = 15,
-        url_patterns = ["wedding", "event", "banquet", "mice"],
+        url_patterns = ["wedding", "celebration", "meeting"],
     ),
     IngestionSource(
         name         = "The Leela — Investor / Corporate",
-        url          = "https://www.theleela.com/en_US/investor-relations.html",
+        url          = "https://www.theleela.com",
         source_type  = "official",
         mode         = "investor",
         max_pages    = 20,
-        url_patterns = ["investor", "annual", "report", "corporate", "esg"],
+        url_patterns = ["investor", "annual", "corporate", "sustainability", "press-room"],
     ),
 
     # ── TIER 2 — PRESS ────────────────────────────────────────────────────
-    # NOTE: Press sites often block bots. Firecrawl's anti-bot layer helps.
-    # If a source returns empty content, flag it — do not waste credits retrying.
     IngestionSource(
         name         = "Condé Nast Traveller India — Leela coverage",
         url          = "https://www.cntraveller.in",
@@ -131,12 +97,10 @@ SOURCES: list[IngestionSource] = [
         url_patterns = ["leela"],
     ),
 
-    # ── TIER 3 — COMPETITIVE INTELLIGENCE ────────────────────────────────
-    # Stored with source_type="competitive" so the frontend can optionally
-    # surface or suppress competitor content depending on the mode.
+    # ── TIER 3 — COMPETITIVE ──────────────────────────────────────────────
     IngestionSource(
         name         = "Taj Hotels — Property Pages",
-        url          = "https://www.tajhotels.com/en-in/hotels/",
+        url          = "https://www.tajhotels.com/en-in/",
         source_type  = "competitive",
         mode         = "internal",
         max_pages    = 15,
@@ -155,19 +119,63 @@ SOURCES: list[IngestionSource] = [
         source_type  = "competitive",
         mode         = "internal",
         max_pages    = 10,
-        url_patterns = ["luxury", "welcome", "hotel"],
+        url_patterns = ["luxury", "hotel"],
     ),
-
-    # ── TIER 4 — UGC (stub — implement after Tiers 1-3 are stable) ────────
-    # TripAdvisor's ToS prohibits bulk scraping. Use their public API or
-    # manually curate representative reviews and load them as PDFs.
-    # Uncomment and implement when you have a compliant data source.
-    #
-    # IngestionSource(
-    #     name        = "TripAdvisor — Leela Reviews Summary",
-    #     url         = "https://www.tripadvisor.in/...",
-    #     source_type = "ugc",
-    #     mode        = "concierge",
-    #     max_pages   = 5,
-    # ),
 ]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  MANUAL URL LIST
+#  Updated with correct theleela.com URL structure (May 2026)
+#  Used as fallback when auto-crawl returns 0 pages (JS blocking).
+# ══════════════════════════════════════════════════════════════════════════
+
+MANUAL_URLS: dict[str, list[str]] = {
+
+    "The Leela — Properties Overview": [
+        "https://www.theleela.com",
+        "https://www.theleela.com/the-leela-palace-new-delhi",
+        "https://www.theleela.com/the-leela-palace-bengaluru",
+        "https://www.theleela.com/the-leela-palace-chennai",
+        "https://www.theleela.com/the-leela-palace-udaipur",
+        "https://www.theleela.com/the-leela-palace-jaipur",
+        "https://www.theleela.com/the-leela-goa",
+        "https://www.theleela.com/the-leela-kovalam-a-raviz-hotel",
+        "https://www.theleela.com/the-leela-ambience-gurugram-hotel-residences",
+        "https://www.theleela.com/the-leela-bhartiya-city-bengaluru",
+        "https://www.theleela.com/the-leela-hyderabad",
+        "https://www.theleela.com/the-leela-ambience-convention-hotel-delhi",
+    ],
+
+    "The Leela — Dining": [
+        "https://www.theleela.com/the-leela-palace-new-delhi/dine",
+        "https://www.theleela.com/the-leela-palace-bengaluru/dine",
+        "https://www.theleela.com/the-leela-palace-udaipur/dine",
+        "https://www.theleela.com/the-leela-palace-jaipur/dine",
+        "https://www.theleela.com/the-leela-palace-chennai/dine",
+        "https://www.theleela.com/the-leela-ambience-gurugram-hotel-residences/dine",
+    ],
+
+    "The Leela — Spa & Wellness": [
+        "https://www.theleela.com/wellness",
+        "https://www.theleela.com/the-leela-palace-udaipur/experience/wellness",
+        "https://www.theleela.com/the-leela-palace-new-delhi/experience/wellness",
+        "https://www.theleela.com/the-leela-palace-bengaluru/experience/wellness",
+        "https://www.theleela.com/the-leela-ambience-gurugram-hotel-residences/experience/wellness",
+        "https://www.theleela.com/the-leela-ambience-convention-hotel-delhi/experience/wellness",
+    ],
+
+    "The Leela — Weddings & Events": [
+        "https://www.theleela.com/the-leela-palace-new-delhi/celebrations",
+        "https://www.theleela.com/the-leela-palace-udaipur/celebrations",
+        "https://www.theleela.com/the-leela-palace-jaipur/celebrations",
+        "https://www.theleela.com/the-leela-palace-bengaluru/celebrations",
+        "https://www.theleela.com/the-leela-ambience-gurugram-hotel-residences/celebrations",
+    ],
+
+    "The Leela — Investor / Corporate": [
+        "https://www.theleela.com/leela-discovery-loyalty-programme",
+        "https://www.theleela.com/special-offers/the-leela-palace-trail",
+        "https://www.theleela.com/press-room/the-leela-voted-one-top-15-hotel-brands-the-world-travelleisure-usa-2017-worlds-best",
+    ],
+}
