@@ -1,6 +1,5 @@
-# ═══════════════════════════════════════════════════════════════════════════
-# LIP v2 — Scheduled Ingestion (fixed permissions + crawl4ai imports)
-# ═══════════════════════════════════════════════════════════════════════════
+# LIP v2 — Scheduled Ingestion (Firecrawl edition)
+# Schedule: Every Sunday 8:30pm UTC = Monday 2:00am IST
 
 name: LIP v2 — Scheduled Ingestion
 
@@ -20,7 +19,6 @@ on:
           - press
           - competitive
 
-# ── Fix for 403 error: grant write access to Issues ──────────────────────
 permissions:
   contents: read
   issues: write
@@ -47,23 +45,14 @@ jobs:
           key: ${{ runner.os }}-hf-models-v2
           restore-keys: ${{ runner.os }}-hf-
 
-      - name: Cache Playwright browser
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-chromium
-          restore-keys: ${{ runner.os }}-playwright-
-
       - name: Install Python dependencies
         run: pip install -r ingestion/requirements.txt
-
-      - name: Set up Crawl4AI browser
-        run: crawl4ai-setup
 
       - name: Run ingestion pipeline
         env:
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          FIRECRAWL_API_KEY:    ${{ secrets.FIRECRAWL_API_KEY }}
           LANGCHAIN_API_KEY:    ${{ secrets.LANGCHAIN_API_KEY }}
           LANGCHAIN_TRACING_V2: "true"
           LANGCHAIN_PROJECT:    "lip-v2-ingestion"
@@ -75,7 +64,7 @@ jobs:
           fi
 
       - name: Post run summary to GitHub Issue
-        if: success()
+        if: always()
         uses: actions/github-script@v7
         with:
           script: |
@@ -83,26 +72,10 @@ jobs:
             let output = '';
             try { output = fs.readFileSync('run_output.txt', 'utf8').slice(-3000); } catch(e) { output = 'No output captured.'; }
             const now = new Date().toISOString();
+            const status = '${{ job.status }}' === 'success' ? '✅' : '❌';
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo:  context.repo.repo,
-              issue_number: 1,
-              body: `## ✅ Ingestion Run — ${now}\n\`\`\`\n${output}\n\`\`\``
-            });
-
-      - name: Create failure issue on error
-        if: failure()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            let output = '';
-            try { output = fs.readFileSync('run_output.txt', 'utf8').slice(-2000); } catch(e) { output = 'No output file found.'; }
-            const now = new Date().toISOString();
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo:  context.repo.repo,
-              title: `🚨 Ingestion Failed — ${now}`,
-              body:  `Pipeline failed.\n\n\`\`\`\n${output}\n\`\`\`\n\n[View full logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`,
-              labels: ["ingestion-failure"]
+              issue_number: 2,
+              body: `## ${status} Ingestion Run — ${now}\n\`\`\`\n${output}\n\`\`\``
             });
