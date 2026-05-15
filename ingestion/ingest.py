@@ -157,8 +157,8 @@ def crawl_source(
 
         log.info(f"[CRAWL] ✓ {len(normalised)} pages from {source.name}")
 
-        # Polite delay between sources
-       time.sleep(25)  # Firecrawl free tier: 3 req/min limit
+        # Polite delay — Firecrawl free tier allows 3 req/min
+        time.sleep(25)
         return normalised
 
     except Exception as exc:
