@@ -179,9 +179,14 @@ _splitter = RecursiveCharacterTextSplitter(
 
 
 def _stable_id(url: str, chunk_index: int) -> str:
-    """Deterministic ID — same URL + position = same ID = safe upsert."""
-    raw = f"{url}::{chunk_index}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:36]
+    """
+    Deterministic UUID from URL + chunk position.
+    UUID5 always produces a valid UUID format (with dashes).
+    Same input always = same UUID = safe idempotent upsert.
+    """
+    import uuid
+    name = f"{url}::{chunk_index}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, name))
 
 
 def chunk_pages(pages: list[dict], source: IngestionSource) -> Iterator[dict]:
