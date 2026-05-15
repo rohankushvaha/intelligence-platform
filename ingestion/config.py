@@ -3,7 +3,7 @@ LIP v2 — Leela Intelligence Platform
 Ingestion Pipeline Configuration
 ─────────────────────────────────────────────────────────────────────────────
 All URLs verified working May 2026 from live search results.
-theleela.com migrated from /en_US/ to clean URLs — old format returns 0 pages.
+Mode values match v1 Supabase schema: guest / investor / internal
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 SourceType = Literal["official", "press", "competitive", "ugc"]
-Mode       = Literal["concierge", "investor", "internal"]
+Mode       = Literal["guest", "investor", "internal"]
 
 SUPABASE_TABLE    = "documents"
 EMBEDDING_DIM     = 384
@@ -35,12 +35,12 @@ class IngestionSource:
 SOURCES: list[IngestionSource] = [
 
     # ── TIER 1 — OFFICIAL ─────────────────────────────────────────────────
-    # Root URL — Firecrawl will discover subpages automatically
+
     IngestionSource(
         name         = "The Leela — Brand & Properties",
         url          = "https://www.theleela.com",
         source_type  = "official",
-        mode         = "concierge",
+        mode         = "guest",
         max_pages    = 25,
         url_patterns = [
             "about-us",
@@ -50,43 +50,44 @@ SOURCES: list[IngestionSource] = [
         ],
     ),
 
-    # Press room — verified working, rich content
     IngestionSource(
-        name         = "The Leela — Press Room",
-        url          = "https://www.theleela.com/press-room",
-        source_type  = "official",
-        mode         = "investor",
-        max_pages    = 20,
+        name        = "The Leela — Press Room",
+        url         = "https://www.theleela.com/press-room",
+        source_type = "official",
+        mode        = "investor",
+        max_pages   = 20,
     ),
 
-    # Investor relations — verified domain
     IngestionSource(
-        name         = "The Leela — Investor Relations",
-        url          = "https://www.theleela.com/investors",
-        source_type  = "official",
-        mode         = "investor",
-        max_pages    = 15,
+        name        = "The Leela — Investor Relations",
+        url         = "https://www.theleela.com/investors",
+        source_type = "official",
+        mode        = "investor",
+        max_pages   = 15,
     ),
 
     # ── TIER 2 — PRESS ────────────────────────────────────────────────────
+
     IngestionSource(
         name         = "Condé Nast Traveller India — Leela",
         url          = "https://www.cntraveller.in",
         source_type  = "press",
-        mode         = "concierge",
+        mode         = "guest",
         max_pages    = 10,
         url_patterns = ["leela"],
     ),
+
     IngestionSource(
         name         = "Travel + Leisure India — Leela",
         url          = "https://www.tlindia.com",
         source_type  = "press",
-        mode         = "concierge",
+        mode         = "guest",
         max_pages    = 10,
         url_patterns = ["leela"],
     ),
 
     # ── TIER 3 — COMPETITIVE ──────────────────────────────────────────────
+
     IngestionSource(
         name         = "Taj Hotels — Properties",
         url          = "https://www.tajhotels.com/en-in/",
@@ -95,13 +96,15 @@ SOURCES: list[IngestionSource] = [
         max_pages    = 15,
         url_patterns = ["hotel", "palace", "resort"],
     ),
+
     IngestionSource(
-        name         = "Oberoi Hotels — Properties",
-        url          = "https://www.oberoihotels.com/hotels-in-india/",
-        source_type  = "competitive",
-        mode         = "internal",
-        max_pages    = 10,
+        name        = "Oberoi Hotels — Properties",
+        url         = "https://www.oberoihotels.com/hotels-in-india/",
+        source_type = "competitive",
+        mode        = "internal",
+        max_pages   = 10,
     ),
+
     IngestionSource(
         name         = "ITC Hotels — Luxury",
         url          = "https://www.itchotels.com/in/en",
@@ -114,9 +117,8 @@ SOURCES: list[IngestionSource] = [
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  VERIFIED MANUAL URLS
-#  Confirmed working from live search — May 2026
-#  Used as direct scrape targets for Firecrawl
+#  VERIFIED MANUAL URLS — May 2026
+#  Fallback if Firecrawl auto-discovery returns zero links
 # ══════════════════════════════════════════════════════════════════════════
 
 MANUAL_URLS: dict[str, list[str]] = {
