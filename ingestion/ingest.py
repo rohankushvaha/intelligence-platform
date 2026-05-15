@@ -1,18 +1,24 @@
 """
 LIP v2 — Leela Intelligence Platform
-Core Ingestion Pipeline (Crawl4AI — JS rendering fix)
+Core Ingestion Pipeline (Firecrawl edition)
 ─────────────────────────────────────────────────────────────────────────────
-Fix: theleela.com is heavily JavaScript-rendered. Links and content only
-appear after JS executes. Changed wait strategy to 'networkidle' and added
-explicit page delay. Also added a MANUAL_URLS fallback — if crawling finds
-zero links, we scrape a predefined list of known Leela URLs directly.
+Firecrawl handles JS rendering, bot protection, and proxy rotation
+automatically — this is why it works on theleela.com where Crawl4AI failed.
+
+Free tier: 500 credits (1 credit = 1 page). ~100 credits per full run.
+Upgrade to Hobby ($16/month) for 3,000 credits/month for weekly automation.
+
+Run:
+  python ingest.py --source-type official    # Tier 1 — Leela official
+  python ingest.py --source-type competitive # Tier 3 — competitor intel
+  python ingest.py --dry-run                 # test without writing to DB
+  python ingest.py --list-sources            # see all sources
 ─────────────────────────────────────────────────────────────────────────────
 """
 
 from __future__ import annotations
 
 import argparse
-import asyncio
 import hashlib
 import json
 import logging
@@ -29,7 +35,7 @@ load_dotenv()
 os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
 os.environ.setdefault("LANGCHAIN_PROJECT", "lip-v2-ingestion")
 
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+from firecrawl import FirecrawlApp
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langsmith import traceable
 from sentence_transformers import SentenceTransformer
@@ -57,47 +63,6 @@ log = logging.getLogger("lip.ingest")
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  MANUAL URL LIST — fallback for JS-heavy sites
-#  These are the known, stable Leela URLs we always want ingested.
-#  If the crawler finds zero links (JS rendering issue), we scrape these
-#  directly. Add more URLs here as the site grows.
-# ══════════════════════════════════════════════════════════════════════════
-
-MANUAL_URLS: dict[str, list[str]] = {
-    "The Leela — Properties Overview": [
-        "https://www.theleela.com/en_US/hotels-resorts.html",
-        "https://www.theleela.com/en_US/the-leela-palace-new-delhi.html",
-        "https://www.theleela.com/en_US/the-leela-palace-bengaluru.html",
-        "https://www.theleela.com/en_US/the-leela-palace-chennai.html",
-        "https://www.theleela.com/en_US/the-leela-palace-udaipur.html",
-        "https://www.theleela.com/en_US/the-leela-palace-jaipur.html",
-        "https://www.theleela.com/en_US/the-leela-goa.html",
-        "https://www.theleela.com/en_US/the-leela-kovalam.html",
-        "https://www.theleela.com/en_US/the-leela-ambience-gurugram.html",
-        "https://www.theleela.com/en_US/the-leela-bhartiya-city-bengaluru.html",
-    ],
-    "The Leela — Dining": [
-        "https://www.theleela.com/en_US/dining.html",
-        "https://www.theleela.com/en_US/jamavar-restaurant.html",
-        "https://www.theleela.com/en_US/le-cirque-signature.html",
-    ],
-    "The Leela — Spa & Wellness": [
-        "https://www.theleela.com/en_US/spa-wellness.html",
-        "https://www.theleela.com/en_US/spa.html",
-    ],
-    "The Leela — Weddings & Events": [
-        "https://www.theleela.com/en_US/weddings-and-events.html",
-        "https://www.theleela.com/en_US/meetings-and-events.html",
-    ],
-    "The Leela — Investor / Corporate": [
-        "https://www.theleela.com/en_US/investor-relations.html",
-        "https://www.theleela.com/en_US/about-us.html",
-        "https://www.theleela.com/en_US/sustainability.html",
-    ],
-}
-
-
-# ══════════════════════════════════════════════════════════════════════════
 #  CLIENT INITIALISATION
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -109,193 +74,95 @@ def _require_env(key: str) -> str:
     return value
 
 
-def init_clients() -> tuple[SupabaseClient, SentenceTransformer]:
+def init_clients() -> tuple[FirecrawlApp, SupabaseClient, SentenceTransformer]:
     log.info("Initialising clients…")
+
+    # Firecrawl — handles JS, proxies, bot protection automatically
+    firecrawl = FirecrawlApp(api_key=_require_env("FIRECRAWL_API_KEY"))
+
+    # Supabase — pgvector database
     supabase = create_client(
         _require_env("SUPABASE_URL"),
         _require_env("SUPABASE_SERVICE_KEY"),
     )
-    log.info("Loading embedding model (all-MiniLM-L6-v2)…")
+
+    # Embedding model — same as v1, 384 dims
+    log.info("Loading embedding model…")
     embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-    log.info("Clients ready.")
-    return supabase, embed_model
 
-
-# ══════════════════════════════════════════════════════════════════════════
-#  CRAWL4AI CONFIG — JS rendering fix
-# ══════════════════════════════════════════════════════════════════════════
-
-def get_browser_config() -> BrowserConfig:
-    return BrowserConfig(
-        headless       = True,
-        verbose        = False,
-        sleep_on_close = True,
-    )
-
-
-def get_crawl_config() -> CrawlerRunConfig:
-    return CrawlerRunConfig(
-        cache_mode = CacheMode.BYPASS,
-
-        # KEY FIX: wait for network to go idle (all JS/AJAX done)
-        # 'networkidle' waits until no network requests for 500ms
-        # This is much more reliable than 'domcontentloaded' for JS sites
-        wait_until = "networkidle",
-
-        # Additional wait after networkidle — some sites have delayed renders
-        # 3 seconds gives JS frameworks time to paint content into the DOM
-        page_timeout            = 60000,    # 60s total timeout (up from 30s)
-        word_count_threshold    = 10,       # lower threshold — capture more
-        exclude_external_links  = True,
-        remove_overlay_elements = True,
-        process_iframes         = False,
-        mean_delay              = 2.0,      # polite delay between requests
-        max_range               = 1.0,
-    )
+    log.info("All clients ready.")
+    return firecrawl, supabase, embed_model
 
 
 # ══════════════════════════════════════════════════════════════════════════
 #  STEP 1 — CRAWL
 # ══════════════════════════════════════════════════════════════════════════
 
-async def _scrape_urls_async(urls: list[str], source_name: str) -> list[dict]:
-    """
-    Scrape a known list of URLs directly.
-    Used as primary strategy for JS-heavy sites where link discovery fails.
-    """
-    log.info(f"[CRAWL] Scraping {len(urls)} known URLs for {source_name}")
-
-    browser_config = get_browser_config()
-    crawl_config   = get_crawl_config()
-    pages          = []
-
-    async with AsyncWebCrawler(config=browser_config) as crawler:
-        results = await crawler.arun_many(
-            urls   = urls,
-            config = crawl_config,
-        )
-
-        for result in (results if isinstance(results, list) else [results]):
-            if not result.success:
-                log.warning(f"[CRAWL] Failed: {getattr(result, 'url', '?')} — {getattr(result, 'error_message', '')}")
-                continue
-
-            markdown = (result.markdown or "").strip()
-            if len(markdown) < 50:
-                log.debug(f"[CRAWL] Near-empty page skipped: {result.url}")
-                continue
-
-            title = ""
-            if result.metadata:
-                title = result.metadata.get("title", source_name)
-
-            pages.append({
-                "url"     : result.url,
-                "markdown": markdown,
-                "title"   : title or source_name,
-            })
-            log.info(f"[CRAWL] ✓ {result.url} ({len(markdown)} chars)")
-
-    log.info(f"[CRAWL] {source_name} → {len(pages)} usable pages")
-    return pages
-
-
-async def _crawl_source_async(source: IngestionSource) -> list[dict]:
-    """
-    Two-strategy crawl:
-    1. Try to discover links from root URL (works on simple HTML sites)
-    2. If zero links found, fall back to MANUAL_URLS for this source
-    This handles both JS-heavy sites (theleela.com) and simpler sites.
-    """
-    log.info(f"[CRAWL] Starting: {source.name} → {source.url}")
-
-    browser_config = get_browser_config()
-    crawl_config   = get_crawl_config()
-    pages          = []
-
-    async with AsyncWebCrawler(config=browser_config) as crawler:
-
-        # Strategy 1: Crawl root URL
-        root_result = await crawler.arun(url=source.url, config=crawl_config)
-
-        if root_result.success:
-            markdown = (root_result.markdown or "").strip()
-            if len(markdown) > 50:
-                title = ""
-                if root_result.metadata:
-                    title = root_result.metadata.get("title", source.name)
-                pages.append({
-                    "url"     : source.url,
-                    "markdown": markdown,
-                    "title"   : title or source.name,
-                })
-
-            # Try to discover internal links
-            internal_links = []
-            if root_result.links:
-                for link in root_result.links.get("internal", []):
-                    href = link.get("href", "")
-                    if not href or href == source.url:
-                        continue
-                    if source.url_patterns:
-                        if any(p in href for p in source.url_patterns):
-                            internal_links.append(href)
-                    else:
-                        internal_links.append(href)
-
-            # Deduplicate
-            seen = {source.url}
-            filtered = []
-            for link in internal_links:
-                if link not in seen:
-                    seen.add(link)
-                    filtered.append(link)
-                if len(filtered) >= source.max_pages - 1:
-                    break
-
-            log.info(f"[CRAWL] Discovered {len(filtered)} links from {source.name}")
-
-            # Crawl discovered links
-            if filtered:
-                results = await crawler.arun_many(urls=filtered, config=crawl_config)
-                for result in (results if isinstance(results, list) else [results]):
-                    if not result.success:
-                        continue
-                    md = (result.markdown or "").strip()
-                    if len(md) < 50:
-                        continue
-                    title = ""
-                    if result.metadata:
-                        title = result.metadata.get("title", source.name)
-                    pages.append({"url": result.url, "markdown": md, "title": title or source.name})
-
-    # Strategy 2: If still no pages, use manual URL list
-    if len(pages) == 0 and source.name in MANUAL_URLS:
-        log.warning(f"[CRAWL] Zero pages from auto-crawl. Falling back to manual URLs for {source.name}")
-        pages = await _scrape_urls_async(MANUAL_URLS[source.name], source.name)
-    elif len(pages) <= 1 and source.name in MANUAL_URLS:
-        # Only got root page — supplement with manual URLs
-        log.info(f"[CRAWL] Only root page found. Supplementing with manual URLs for {source.name}")
-        manual_pages = await _scrape_urls_async(MANUAL_URLS[source.name], source.name)
-        # Add manual pages not already in pages
-        existing_urls = {p["url"] for p in pages}
-        for p in manual_pages:
-            if p["url"] not in existing_urls:
-                pages.append(p)
-
-    log.info(f"[CRAWL] ✓ {len(pages)} total usable pages from {source.name}")
-    return pages
-
-
 @traceable(name="crawl_source")
-def crawl_source(source: IngestionSource, dry_run: bool = False) -> list[dict]:
+def crawl_source(
+    firecrawl: FirecrawlApp,
+    source   : IngestionSource,
+    dry_run  : bool = False,
+) -> list[dict]:
+    """
+    Crawl a source URL using Firecrawl.
+    Firecrawl handles everything: JS rendering, bot detection,
+    proxy rotation, clean markdown output. One API call per source.
+    """
     if dry_run:
         log.info(f"[DRY RUN] Skipping crawl for {source.name}")
-        return [{"url": source.url, "markdown": "# Dry run placeholder content for testing", "title": "Dry Run"}]
+        return [{"url": source.url, "markdown": "# Dry run placeholder", "title": "Dry Run"}]
+
+    log.info(f"[CRAWL] {source.name} → {source.url}")
+
+    params: dict = {
+        "limit"        : source.max_pages,
+        "scrapeOptions": {
+            "formats": ["markdown"],
+        },
+    }
+
+    # Restrict crawl to matching URL patterns — saves credits
+    if source.url_patterns:
+        params["includePaths"] = source.url_patterns
+
     try:
-        return asyncio.run(_crawl_source_async(source))
+        result = firecrawl.crawl_url(source.url, params=params)
+
+        # Handle both dict and object response formats
+        if isinstance(result, dict):
+            pages = result.get("data", [])
+        else:
+            pages = getattr(result, "data", []) or []
+
+        # Normalise page format
+        normalised = []
+        for page in pages:
+            if isinstance(page, dict):
+                markdown = page.get("markdown", "") or ""
+                url      = page.get("metadata", {}).get("sourceURL", source.url)
+                title    = page.get("metadata", {}).get("title", source.name)
+            else:
+                markdown = getattr(page, "markdown", "") or ""
+                metadata = getattr(page, "metadata", {}) or {}
+                url      = metadata.get("sourceURL", source.url)
+                title    = metadata.get("title", source.name)
+
+            if len(markdown.strip()) > 50:
+                normalised.append({
+                    "url"     : url,
+                    "markdown": markdown.strip(),
+                    "title"   : title,
+                })
+
+        log.info(f"[CRAWL] ✓ {len(normalised)} pages from {source.name}")
+
+        # Polite delay between sources
+        time.sleep(2)
+        return normalised
+
     except Exception as exc:
-        log.error(f"[CRAWL] ✗ Failed for {source.name}: {exc}")
+        log.error(f"[CRAWL] ✗ {source.name} failed: {exc}")
         return []
 
 
@@ -312,6 +179,7 @@ _splitter = RecursiveCharacterTextSplitter(
 
 
 def _stable_id(url: str, chunk_index: int) -> str:
+    """Deterministic ID — same URL + position = same ID = safe upsert."""
     raw = f"{url}::{chunk_index}"
     return hashlib.sha256(raw.encode()).hexdigest()[:36]
 
@@ -325,9 +193,7 @@ def chunk_pages(pages: list[dict], source: IngestionSource) -> Iterator[dict]:
         if not raw_text or len(raw_text) < 50:
             continue
 
-        text_chunks = _splitter.split_text(raw_text)
-
-        for idx, chunk_text in enumerate(text_chunks):
+        for idx, chunk_text in enumerate(_splitter.split_text(raw_text)):
             yield {
                 "id"           : _stable_id(page_url, idx),
                 "content"      : chunk_text,
@@ -345,14 +211,20 @@ def chunk_pages(pages: list[dict], source: IngestionSource) -> Iterator[dict]:
 #  STEP 3 — EMBED
 # ══════════════════════════════════════════════════════════════════════════
 
-def embed_chunks(chunks: list[dict], embed_model: SentenceTransformer, batch_size: int = 32) -> list[dict]:
+def embed_chunks(
+    chunks    : list[dict],
+    embed_model: SentenceTransformer,
+    batch_size : int = 32,
+) -> list[dict]:
     texts = [c["content"] for c in chunks]
     log.info(f"[EMBED] Encoding {len(texts)} chunks…")
 
     all_vectors = []
     for i in range(0, len(texts), batch_size):
-        batch   = texts[i : i + batch_size]
-        vectors = embed_model.encode(batch, show_progress_bar=False).tolist()
+        vectors = embed_model.encode(
+            texts[i : i + batch_size],
+            show_progress_bar=False,
+        ).tolist()
         all_vectors.extend(vectors)
 
     for chunk, vector in zip(chunks, all_vectors):
@@ -367,9 +239,12 @@ def embed_chunks(chunks: list[dict], embed_model: SentenceTransformer, batch_siz
 # ══════════════════════════════════════════════════════════════════════════
 
 @traceable(name="upsert_to_supabase")
-def upsert_chunks(supabase: SupabaseClient, chunks: list[dict], batch_size: int = 50) -> int:
+def upsert_chunks(
+    supabase  : SupabaseClient,
+    chunks    : list[dict],
+    batch_size: int = 50,
+) -> int:
     if not chunks:
-        log.warning("[UPSERT] No chunks to upsert.")
         return 0
 
     now      = datetime.now(timezone.utc).isoformat()
@@ -396,7 +271,7 @@ def upsert_chunks(supabase: SupabaseClient, chunks: list[dict], batch_size: int 
             upserted += len(batch)
             log.info(f"[UPSERT] ✓ Batch {i // batch_size + 1}: {len(batch)} rows")
         except Exception as exc:
-            log.error(f"[UPSERT] ✗ Batch {i // batch_size + 1} failed: {exc}")
+            log.error(f"[UPSERT] ✗ Batch failed: {exc}")
 
     return upserted
 
@@ -408,26 +283,26 @@ def upsert_chunks(supabase: SupabaseClient, chunks: list[dict], batch_size: int 
 @traceable(name="run_ingestion_pipeline")
 def run_pipeline(
     sources    : list[IngestionSource],
+    firecrawl  : FirecrawlApp,
     supabase   : SupabaseClient,
     embed_model: SentenceTransformer,
     dry_run    : bool = False,
 ) -> dict:
-    start_time = time.time()
-    summary    = {
+    start   = time.time()
+    summary = {
         "total_sources"  : len(sources),
         "total_pages"    : 0,
         "total_chunks"   : 0,
         "total_upserted" : 0,
         "failed_sources" : [],
-        "crawler"        : "crawl4ai (free, keyless) + manual URL fallback",
+        "crawler"        : "firecrawl",
     }
 
     for source in sources:
         log.info(f"\n{'─' * 60}")
-        log.info(f"Source : {source.name}")
-        log.info(f"Type   : {source.source_type} | Mode: {source.mode}")
+        log.info(f"Source: {source.name} [{source.source_type}]")
 
-        pages = crawl_source(source, dry_run=dry_run)
+        pages = crawl_source(firecrawl, source, dry_run=dry_run)
         summary["total_pages"] += len(pages)
 
         if not pages:
@@ -442,10 +317,9 @@ def run_pipeline(
             continue
 
         chunks = embed_chunks(chunks, embed_model)
-        n      = upsert_chunks(supabase, chunks)
-        summary["total_upserted"] += n
+        summary["total_upserted"] += upsert_chunks(supabase, chunks)
 
-    summary["elapsed_seconds"] = round(time.time() - start_time, 1)
+    summary["elapsed_seconds"] = round(time.time() - start, 1)
     summary["run_at"]          = datetime.now(timezone.utc).isoformat()
 
     log.info(f"\n{'═' * 60}")
@@ -486,8 +360,14 @@ def main() -> None:
         log.error("No sources matched.")
         sys.exit(1)
 
-    supabase, embed_model = init_clients()
-    run_pipeline(sources=sources, supabase=supabase, embed_model=embed_model, dry_run=args.dry_run)
+    firecrawl, supabase, embed_model = init_clients()
+    run_pipeline(
+        sources     = sources,
+        firecrawl   = firecrawl,
+        supabase    = supabase,
+        embed_model = embed_model,
+        dry_run     = args.dry_run,
+    )
 
 
 if __name__ == "__main__":
