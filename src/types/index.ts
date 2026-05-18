@@ -1,9 +1,15 @@
 // ============================================================
-// Leela Intelligence Platform — Shared TypeScript Interfaces
+// Leela Intelligence Platform v2 — Shared TypeScript Interfaces
 // ============================================================
 
 /** The three operational modes of the LIP assistant */
 export type Mode = 'guest' | 'investor' | 'internal';
+
+/** Knowledge source tiers — v2 addition */
+export type SourceType = 'official' | 'press' | 'competitive' | 'ugc';
+
+/** Source filter for UI knowledge tier chips — v2 addition */
+export type SourceFilter = 'all' | SourceType;
 
 /** A single chat message in a conversation */
 export interface Message {
@@ -11,6 +17,7 @@ export interface Message {
   role: 'user' | 'assistant';
   content: string;
   sources?: string[];
+  sourceTypes?: SourceType[];   // v2 — per-source type for badges
   timestamp: Date;
   isStreaming?: boolean;
 }
@@ -21,8 +28,11 @@ export interface DocumentChunk {
   content: string;
   source_name: string;
   source_url: string;
+  source_type: SourceType;      // v2 — knowledge tier
   mode: Mode | 'all';
   chunk_index: number;
+  property_name: string | null; // v2 — property attribution
+  sentiment_score: number | null; // v2 — sentiment scoring
   similarity?: number;
 }
 
@@ -37,6 +47,7 @@ export interface DocumentChunkWithEmbedding extends DocumentChunk {
 export interface RetrievalResult {
   response: string;
   sources: string[];
+  sourceTypes?: SourceType[];
 }
 
 /** Chat state managed per mode by Zustand */
@@ -54,7 +65,7 @@ export interface ChatStore {
   addMessage: (mode: Mode, message: Message) => void;
   setLoading: (mode: Mode, loading: boolean) => void;
   setError: (mode: Mode, error: string | null) => void;
-  updateLastMessage: (mode: Mode, content: string, sources?: string[]) => void;
+  updateLastMessage: (mode: Mode, content: string, sources?: string[], sourceTypes?: SourceType[]) => void;
   clearMessages: (mode: Mode) => void;
   markStreamingDone: (mode: Mode) => void;
 }
@@ -64,6 +75,7 @@ export interface DocumentRecord {
   id: string;
   source_name: string;
   source_url: string;
+  source_type: SourceType;
   mode: Mode | 'all';
   chunk_index: number;
   created_at: string;
@@ -75,6 +87,7 @@ export interface IngestionForm {
   content: string;
   sourceName: string;
   sourceUrl: string;
+  sourceType: SourceType;
   mode: Mode | 'all';
 }
 
@@ -86,4 +99,21 @@ export interface ModeConfig {
   systemPrompt: string;
   suggestions: string[];
   pinProtected: boolean;
+}
+
+/** KB health stats for admin dashboard — v2 addition */
+export interface KBStats {
+  totalChunks: number;
+  bySourceType: Array<{
+    source_type: SourceType;
+    count: number;
+    last_updated: string | null;
+  }>;
+  bySources: Array<{
+    source_name: string;
+    source_type: SourceType;
+    mode: string;
+    count: number;
+    last_updated: string | null;
+  }>;
 }
