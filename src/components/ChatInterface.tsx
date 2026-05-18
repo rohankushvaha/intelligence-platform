@@ -1,5 +1,10 @@
 // ============================================================
-// Leela Intelligence Platform — Chat Interface Component
+// Leela Intelligence Platform v2 — Chat Interface
+// ============================================================
+// Changes from v1:
+//   - KnowledgeSourceFilter chips below input
+//   - sourceFilter state passed to useRetrieval hook
+//   - Competitor panel for internal mode
 // ============================================================
 
 import { useState, useRef, useEffect, type KeyboardEvent } from 'react';
@@ -8,27 +13,39 @@ import { TypingIndicator } from './TypingIndicator';
 import { SuggestionChips } from './SuggestionChips';
 import { useRetrieval } from '../hooks/useRetrieval';
 import { useChatStore } from '../hooks/useChat';
-import type { Mode } from '../types';
+import type { Mode, SourceFilter } from '../types';
 
 interface ChatInterfaceProps {
-  mode: Mode;
-  suggestions: string[];
-  placeholder: string;
+  mode        : Mode;
+  suggestions : string[];
+  placeholder : string;
 }
 
+// ── Source filter chip config ──────────────────────────────────────────────
+
+const FILTER_OPTIONS: { value: SourceFilter; label: string }[] = [
+  { value: 'all',         label: 'All Sources'  },
+  { value: 'official',    label: 'Official'     },
+  { value: 'press',       label: 'Press'        },
+  { value: 'competitive', label: 'Competitive'  },
+];
+
 export function ChatInterface({ mode, suggestions, placeholder }: ChatInterfaceProps) {
-  const [input, setInput] = useState('');
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-  const { messages, isLoading, sendMessage } = useRetrieval(mode);
+  const [input, setInput]             = useState('');
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
+  const messagesEndRef                = useRef<HTMLDivElement>(null);
+  const inputRef                      = useRef<HTMLTextAreaElement>(null);
+
+  // v2: pass sourceFilter to useRetrieval
+  const { messages, isLoading, sendMessage } = useRetrieval(mode, sourceFilter);
   const clearMessages = useChatStore((state) => state.clearMessages);
 
   const showSuggestions = messages.length === 0;
-  const isTyping = isLoading && messages.length > 0 &&
+  const isTyping = isLoading &&
+    messages.length > 0 &&
     messages[messages.length - 1]?.role === 'assistant' &&
     messages[messages.length - 1]?.content === '';
 
-  // Auto-scroll to bottom on new messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTyping]);
@@ -48,28 +65,30 @@ export function ChatInterface({ mode, suggestions, placeholder }: ChatInterfaceP
     }
   };
 
-  const handleSuggestion = (suggestion: string) => {
-    sendMessage(suggestion);
-  };
-
   const handleClear = () => {
     clearMessages(mode);
     setInput('');
+    setSourceFilter('all');
     inputRef.current?.focus();
   };
 
+  // Only show competitive filter chip in internal mode
+  const visibleFilters = FILTER_OPTIONS.filter(
+    (o) => o.value !== 'competitive' || mode === 'internal'
+  );
+
   return (
-    <div
-      className="flex flex-col h-full"
-      style={{ backgroundColor: '#F8F5F0' }}
-    >
+    <div className="flex flex-col h-full" style={{ backgroundColor: '#F8F5F0' }}>
+
       {/* Messages area */}
-      <div
-        className="flex-1 overflow-y-auto py-4 leela-scroll"
-        style={{ minHeight: 0 }}
-      >
+      <div className="flex-1 overflow-y-auto py-4 leela-scroll" style={{ minHeight: 0 }}>
         {showSuggestions ? (
-          <WelcomeState mode={mode} suggestions={suggestions} onSelect={handleSuggestion} isLoading={isLoading} />
+          <WelcomeState
+            mode={mode}
+            suggestions={suggestions}
+            onSelect={sendMessage}
+            isLoading={isLoading}
+          />
         ) : (
           <>
             {messages.map((message) => (
@@ -85,36 +104,59 @@ export function ChatInterface({ mode, suggestions, placeholder }: ChatInterfaceP
       <div
         className="flex-shrink-0"
         style={{
-          backgroundColor: '#FFFFFF',
-          borderTop: '1px solid #EDE8DF',
-          padding: '12px 16px',
+          backgroundColor : '#FFFFFF',
+          borderTop       : '1px solid #EDE8DF',
+          padding         : '12px 16px',
         }}
       >
-        {/* Suggestions when chat is active */}
+        {/* Active suggestion chips */}
         {!showSuggestions && suggestions.length > 0 && (
           <div className="mb-2">
             <SuggestionChips
               suggestions={suggestions.slice(0, 2)}
-              onSelect={handleSuggestion}
+              onSelect={sendMessage}
               disabled={isLoading}
             />
           </div>
         )}
 
+        {/* ── v2: Knowledge source filter chips ── */}
+        <div className="flex items-center gap-1.5 mb-3">
+          <span
+            className="text-xs uppercase tracking-widest mr-1"
+            style={{ color: '#8A8A8A', fontFamily: "'Jost', sans-serif" }}
+          >
+            Source
+          </span>
+          {visibleFilters.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => setSourceFilter(opt.value)}
+              className="px-3 py-1 rounded-full text-xs font-medium transition-all duration-150"
+              style={{
+                backgroundColor : sourceFilter === opt.value ? '#21469F' : '#EDE8DF',
+                color           : sourceFilter === opt.value ? '#FFFFFF' : '#1A1A2E',
+                fontFamily      : "'Jost', sans-serif",
+                border          : 'none',
+                cursor          : 'pointer',
+              }}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Text input row */}
         <div className="flex items-end gap-2">
           <div
             className="flex-1 flex items-end rounded-lg overflow-hidden"
             style={{
-              border: '1px solid #EDE8DF',
-              backgroundColor: '#FFFFFF',
-              transition: 'border-color 200ms ease',
+              border          : '1px solid #EDE8DF',
+              backgroundColor : '#FFFFFF',
+              transition      : 'border-color 200ms ease',
             }}
-            onFocusCapture={(e) => {
-              e.currentTarget.style.borderColor = '#21469F';
-            }}
-            onBlurCapture={(e) => {
-              e.currentTarget.style.borderColor = '#EDE8DF';
-            }}
+            onFocusCapture={(e) => { e.currentTarget.style.borderColor = '#21469F'; }}
+            onBlurCapture={(e)  => { e.currentTarget.style.borderColor = '#EDE8DF'; }}
           >
             <textarea
               ref={inputRef}
@@ -126,12 +168,12 @@ export function ChatInterface({ mode, suggestions, placeholder }: ChatInterfaceP
               disabled={isLoading}
               className="flex-1 resize-none outline-none px-4 py-3 text-sm bg-transparent disabled:opacity-50"
               style={{
-                fontFamily: "'Jost', sans-serif",
-                color: '#1A1A2E',
-                minHeight: '44px',
-                maxHeight: '120px',
-                fontSize: '0.875rem',
-                lineHeight: '1.5',
+                fontFamily : "'Jost', sans-serif",
+                color      : '#1A1A2E',
+                minHeight  : '44px',
+                maxHeight  : '120px',
+                fontSize   : '0.875rem',
+                lineHeight : '1.5',
               }}
             />
           </div>
@@ -141,14 +183,10 @@ export function ChatInterface({ mode, suggestions, placeholder }: ChatInterfaceP
             onClick={handleSend}
             disabled={!input.trim() || isLoading}
             className="flex-shrink-0 w-10 h-10 rounded-lg flex items-center justify-center transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed"
-            style={{
-              backgroundColor: '#21469F',
-              color: '#FFFFFF',
-            }}
+            style={{ backgroundColor: '#21469F', color: '#FFFFFF' }}
             onMouseEnter={(e) => {
-              if (input.trim() && !isLoading) {
+              if (input.trim() && !isLoading)
                 (e.currentTarget as HTMLButtonElement).style.backgroundColor = '#1a3a87';
-              }
             }}
             onMouseLeave={(e) => {
               (e.currentTarget as HTMLButtonElement).style.backgroundColor = '#21469F';
@@ -158,24 +196,22 @@ export function ChatInterface({ mode, suggestions, placeholder }: ChatInterfaceP
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
               <path
                 d="M22 2L11 13M22 2L15 22L11 13M22 2L2 9L11 13"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
+                stroke="currentColor" strokeWidth="2"
+                strokeLinecap="round" strokeLinejoin="round"
               />
             </svg>
           </button>
 
-          {/* Clear button — only when messages exist */}
+          {/* Clear button */}
           {messages.length > 0 && (
             <button
               onClick={handleClear}
               disabled={isLoading}
               className="flex-shrink-0 w-10 h-10 rounded-lg flex items-center justify-center transition-all duration-200 disabled:opacity-40"
               style={{
-                backgroundColor: 'transparent',
-                border: '1px solid #EDE8DF',
-                color: '#8A8A8A',
+                backgroundColor : 'transparent',
+                border          : '1px solid #EDE8DF',
+                color           : '#8A8A8A',
               }}
               onMouseEnter={(e) => {
                 (e.currentTarget as HTMLButtonElement).style.borderColor = '#21469F';
@@ -191,10 +227,8 @@ export function ChatInterface({ mode, suggestions, placeholder }: ChatInterfaceP
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
                 <path
                   d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
+                  stroke="currentColor" strokeWidth="1.5"
+                  strokeLinecap="round" strokeLinejoin="round"
                 />
               </svg>
             </button>
@@ -212,27 +246,27 @@ export function ChatInterface({ mode, suggestions, placeholder }: ChatInterfaceP
   );
 }
 
-// ===== Welcome state shown before first message =====
+// ── Welcome state ──────────────────────────────────────────────────────────
 
 interface WelcomeStateProps {
-  mode: Mode;
-  suggestions: string[];
-  onSelect: (s: string) => void;
-  isLoading: boolean;
+  mode        : Mode;
+  suggestions : string[];
+  onSelect    : (s: string) => void;
+  isLoading   : boolean;
 }
 
 const MODE_WELCOME: Record<Mode, { title: string; subtitle: string }> = {
   guest: {
-    title: 'Your Leela Concierge',
-    subtitle: 'Ask me about properties, dining, spa, and experiences across The Leela collection',
+    title    : 'Your Leela Concierge',
+    subtitle : 'Ask me about properties, dining, spa, and experiences across The Leela collection',
   },
   investor: {
-    title: 'Investor Intelligence',
-    subtitle: 'Query financials, RevPAR, pipeline, and disclosures for Leela Palaces Hotels & Resorts',
+    title    : 'Investor Intelligence',
+    subtitle : 'Query financials, RevPAR, pipeline, and disclosures for Leela Palaces Hotels & Resorts',
   },
   internal: {
-    title: 'Sales Intelligence Hub',
-    subtitle: 'Pull property specs, F&B outlets, MICE capacity, and wedding packages instantly',
+    title    : 'Sales Intelligence Hub',
+    subtitle : 'Pull property specs, competitive intel, F&B outlets, and MICE capacity instantly',
   },
 };
 
@@ -241,14 +275,12 @@ function WelcomeState({ mode, suggestions, onSelect, isLoading }: WelcomeStatePr
 
   return (
     <div className="flex flex-col items-center justify-center h-full px-6 py-12 text-center">
-      {/* Gold ornament */}
       <div className="flex items-center gap-3 mb-6">
         <div className="h-px w-8" style={{ backgroundColor: '#C9A84C' }} />
         <svg width="16" height="16" viewBox="0 0 20 20" fill="none">
           <path
             d="M10 1L12.2 7.2H18.8L13.5 10.8L15.7 17L10 13.4L4.3 17L6.5 10.8L1.2 7.2H7.8L10 1Z"
-            fill="#C9A84C"
-            opacity="0.7"
+            fill="#C9A84C" opacity="0.7"
           />
         </svg>
         <div className="h-px w-8" style={{ backgroundColor: '#C9A84C' }} />
@@ -257,19 +289,20 @@ function WelcomeState({ mode, suggestions, onSelect, isLoading }: WelcomeStatePr
       <h3
         className="text-2xl mb-3"
         style={{
-          fontFamily: "'Cormorant Garamond', serif",
-          color: '#1A1A2E',
-          fontWeight: 500,
+          fontFamily   : "'Cormorant Garamond', serif",
+          color        : '#1A1A2E',
+          fontWeight   : 500,
           letterSpacing: '0.02em',
         }}
       >
         {welcome.title}
       </h3>
+
       <p
         className="text-sm leading-relaxed mb-8 max-w-sm"
         style={{
-          fontFamily: "'Jost', sans-serif",
-          color: '#8A8A8A',
+          fontFamily   : "'Jost', sans-serif",
+          color        : '#8A8A8A',
           letterSpacing: '0.03em',
         }}
       >
@@ -291,13 +324,13 @@ function WelcomeState({ mode, suggestions, onSelect, isLoading }: WelcomeStatePr
               disabled={isLoading}
               className="px-4 py-2 text-sm rounded-md transition-all duration-200 disabled:opacity-40"
               style={{
-                border: '1px solid #21469F',
-                color: '#21469F',
-                backgroundColor: 'transparent',
-                fontFamily: "'Jost', sans-serif",
-                fontWeight: 300,
-                letterSpacing: '0.03em',
-                fontSize: '0.8rem',
+                border          : '1px solid #21469F',
+                color           : '#21469F',
+                backgroundColor : 'transparent',
+                fontFamily      : "'Jost', sans-serif",
+                fontWeight      : 300,
+                letterSpacing   : '0.03em',
+                fontSize        : '0.8rem',
               }}
               onMouseEnter={(e) => {
                 if (!isLoading) {
