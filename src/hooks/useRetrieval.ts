@@ -7,7 +7,7 @@
 //   - Passes query_text to retrieval for hybrid BM25 search
 // ============================================================
 
-import { useCallback, useState } from 'react';
+import { useCallback } from 'react';  // removed unused useState
 import { retrieveAndStream } from '../lib/retrieval';
 import { useChatStore, buildGeminiHistory, generateMessageId } from './useChat';
 import type { Mode, Message, SourceFilter, SourceType } from '../types';
