@@ -120,6 +120,7 @@ function UrlIngestSection({ onSuccess, onError }: UrlIngestSectionProps) {
   const [url, setUrl] = useState('');
   const [sourceName, setSourceName] = useState('');
   const [mode, setMode] = useState<Mode | 'all'>('all');
+  const [sourceType, setSourceType] = useState<string>('official');  // v2: knowledge tier
   const [isFetching, setIsFetching] = useState(false);
   const [progress, setProgress] = useState<{ current: number; total: number } | null>(null);
   const [statusMsg, setStatusMsg] = useState('');
@@ -171,7 +172,8 @@ function UrlIngestSection({ onSuccess, onError }: UrlIngestSectionProps) {
         (current, total) => {
           setProgress({ current, total });
           setStatusMsg(`Embedding chunk ${current} of ${total}...`);
-        }
+        },
+        sourceType   // v2: pass knowledge tier
       );
 
       setUrl('');
@@ -271,21 +273,41 @@ function UrlIngestSection({ onSuccess, onError }: UrlIngestSectionProps) {
           />
         </div>
 
-        <div>
-          <label style={labelStyle}>Assistant Mode</label>
-          <select
-            value={mode}
-            onChange={(e) => setMode(e.target.value as Mode | 'all')}
-            style={{ ...inputStyle, cursor: 'pointer' }}
-            onFocus={(e) => { e.currentTarget.style.borderColor = '#21469F'; }}
-            onBlur={(e) => { e.currentTarget.style.borderColor = '#EDE8DF'; }}
-            disabled={isFetching}
-          >
-            <option value="all">All Modes</option>
-            <option value="guest">Guest Concierge only</option>
-            <option value="investor">Investor Assistant only</option>
-            <option value="internal">Internal Copilot only</option>
-          </select>
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label style={labelStyle}>Assistant Mode</label>
+            <select
+              value={mode}
+              onChange={(e) => setMode(e.target.value as Mode | 'all')}
+              style={{ ...inputStyle, cursor: 'pointer' }}
+              onFocus={(e) => { e.currentTarget.style.borderColor = '#21469F'; }}
+              onBlur={(e) => { e.currentTarget.style.borderColor = '#EDE8DF'; }}
+              disabled={isFetching}
+            >
+              <option value="all">All Modes</option>
+              <option value="guest">Guest Concierge only</option>
+              <option value="investor">Investor Assistant only</option>
+              <option value="internal">Internal Copilot only</option>
+            </select>
+          </div>
+
+          {/* v2: Knowledge Tier selector */}
+          <div>
+            <label style={labelStyle}>Knowledge Tier</label>
+            <select
+              value={sourceType}
+              onChange={(e) => setSourceType(e.target.value)}
+              style={{ ...inputStyle, cursor: 'pointer' }}
+              onFocus={(e) => { e.currentTarget.style.borderColor = '#21469F'; }}
+              onBlur={(e) => { e.currentTarget.style.borderColor = '#EDE8DF'; }}
+              disabled={isFetching}
+            >
+              <option value="official">Official (Leela.com)</option>
+              <option value="press">Press & Publications</option>
+              <option value="competitive">Competitor Intelligence</option>
+              <option value="ugc">UGC / Reviews</option>
+            </select>
+          </div>
         </div>
 
         {statusMsg && (
@@ -345,11 +367,13 @@ function UrlIngestSection({ onSuccess, onError }: UrlIngestSectionProps) {
 
 type AdminTab = 'ingest' | 'documents';
 
+// v2: EMPTY_FORM now includes sourceType for the knowledge tier
 const EMPTY_FORM: IngestionForm = {
-  content: '',
-  sourceName: '',
-  sourceUrl: '',
-  mode: 'all',
+  content    : '',
+  sourceName : '',
+  sourceUrl  : '',
+  sourceType : 'official',
+  mode       : 'all',
 };
 
 export function AdminPanel() {
@@ -399,7 +423,8 @@ export function AdminPanel() {
         form.sourceName,
         form.sourceUrl,
         form.mode,
-        (current, total) => setProgress({ current, total })
+        (current, total) => setProgress({ current, total }),
+        form.sourceType   // v2: pass knowledge tier
       );
       setSuccessMsg(`Successfully ingested "${form.sourceName}" — ${count} chunk${count !== 1 ? 's' : ''} stored.`);
       setForm(EMPTY_FORM);
@@ -632,22 +657,43 @@ export function AdminPanel() {
                   />
                 </div>
 
-                <div>
-                  <label style={labelStyle}>Assistant Mode</label>
-                  <select
-                    value={form.mode}
-                    onChange={(e: ChangeEvent<HTMLSelectElement>) =>
-                      setForm({ ...form, mode: e.target.value as Mode | 'all' })
-                    }
-                    style={{ ...inputStyle, cursor: 'pointer' }}
-                    onFocus={(e) => { e.currentTarget.style.borderColor = '#21469F'; }}
-                    onBlur={(e) => { e.currentTarget.style.borderColor = '#EDE8DF'; }}
-                  >
-                    <option value="all">All Modes</option>
-                    <option value="guest">Guest Concierge only</option>
-                    <option value="investor">Investor Assistant only</option>
-                    <option value="internal">Internal Copilot only</option>
-                  </select>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label style={labelStyle}>Assistant Mode</label>
+                    <select
+                      value={form.mode}
+                      onChange={(e: ChangeEvent<HTMLSelectElement>) =>
+                        setForm({ ...form, mode: e.target.value as Mode | 'all' })
+                      }
+                      style={{ ...inputStyle, cursor: 'pointer' }}
+                      onFocus={(e) => { e.currentTarget.style.borderColor = '#21469F'; }}
+                      onBlur={(e) => { e.currentTarget.style.borderColor = '#EDE8DF'; }}
+                    >
+                      <option value="all">All Modes</option>
+                      <option value="guest">Guest Concierge only</option>
+                      <option value="investor">Investor Assistant only</option>
+                      <option value="internal">Internal Copilot only</option>
+                    </select>
+                  </div>
+
+                  {/* v2: Knowledge Tier selector */}
+                  <div>
+                    <label style={labelStyle}>Knowledge Tier</label>
+                    <select
+                      value={form.sourceType}
+                      onChange={(e: ChangeEvent<HTMLSelectElement>) =>
+                        setForm({ ...form, sourceType: e.target.value })
+                      }
+                      style={{ ...inputStyle, cursor: 'pointer' }}
+                      onFocus={(e) => { e.currentTarget.style.borderColor = '#21469F'; }}
+                      onBlur={(e) => { e.currentTarget.style.borderColor = '#EDE8DF'; }}
+                    >
+                      <option value="official">Official (Leela.com)</option>
+                      <option value="press">Press & Publications</option>
+                      <option value="competitive">Competitor Intelligence</option>
+                      <option value="ugc">UGC / Reviews</option>
+                    </select>
+                  </div>
                 </div>
 
                 <div>
@@ -822,6 +868,23 @@ export function AdminPanel() {
                         >
                           {chunks[0].mode}
                         </span>
+                        {/* v2: show source_type badge */}
+                        {chunks[0].source_type && (
+                          <span
+                            className="inline-flex items-center px-2 py-0.5 rounded text-xs"
+                            style={{
+                              backgroundColor: chunks[0].source_type === 'competitive' ? 'rgba(201,168,76,0.15)' : '#EDE8DF',
+                              color: chunks[0].source_type === 'competitive' ? '#C9A84C' : '#666666',
+                              fontFamily: "'Jost', sans-serif",
+                              fontSize: '0.7rem',
+                              borderRadius: '4px',
+                              textTransform: 'uppercase',
+                              border: chunks[0].source_type === 'competitive' ? '1px solid rgba(201,168,76,0.3)' : 'none',
+                            }}
+                          >
+                            {chunks[0].source_type}
+                          </span>
+                        )}
                         <span
                           className="text-xs"
                           style={{ color: '#8A8A8A', fontFamily: "'Jost', sans-serif" }}
@@ -872,7 +935,7 @@ export function AdminPanel() {
           letterSpacing: '0.04em',
         }}
       >
-        Leela Intelligence Platform v1.0 — Built by Rohan Kushvaha
+        Leela Intelligence Platform v2.0 — Built by Rohan Kushvaha
       </div>
     </div>
   );
