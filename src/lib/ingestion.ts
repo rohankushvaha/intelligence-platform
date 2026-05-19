@@ -56,18 +56,20 @@ export function chunkText(text: string): string[] {
  * Full ingestion pipeline: chunk text → embed each chunk → upsert to Supabase.
  * Returns the number of chunks ingested.
  *
- * @param content   Raw document text
- * @param sourceName Display name for citations
- * @param sourceUrl  Optional URL reference
- * @param mode       Which assistant mode can access this content
- * @param onProgress Optional callback called after each chunk is embedded
+ * @param content     Raw document text
+ * @param sourceName  Display name for citations
+ * @param sourceUrl   Optional URL reference
+ * @param mode        Which assistant mode can access this content
+ * @param sourceType  Knowledge tier: 'official' | 'press' | 'competitive' | 'ugc'
+ * @param onProgress  Optional callback called after each chunk is embedded
  */
 export async function ingestDocument(
   content: string,
   sourceName: string,
   sourceUrl: string,
   mode: Mode | 'all',
-  onProgress?: (current: number, total: number) => void
+  onProgress?: (current: number, total: number) => void,
+  sourceType: string = 'official'   // v2: knowledge tier, defaults to 'official'
 ): Promise<number> {
   const chunks = chunkText(content);
 
@@ -76,12 +78,13 @@ export async function ingestDocument(
   }
 
   const embeddedChunks: Array<{
-    content: string;
-    embedding: number[];
-    source_name: string;
-    source_url: string;
-    mode: Mode | 'all';
-    chunk_index: number;
+    content     : string;
+    embedding   : number[];
+    source_name : string;
+    source_url  : string;
+    source_type : string;
+    mode        : Mode | 'all';
+    chunk_index : number;
   }> = [];
 
   // Embed chunks sequentially to avoid rate limiting
@@ -89,12 +92,13 @@ export async function ingestDocument(
     const embedding = await embedText(chunks[i]);
 
     embeddedChunks.push({
-      content: chunks[i],
+      content     : chunks[i],
       embedding,
-      source_name: sourceName,
-      source_url: sourceUrl,
+      source_name : sourceName,
+      source_url  : sourceUrl,
+      source_type : sourceType,   // v2: propagate knowledge tier to Supabase
       mode,
-      chunk_index: i,
+      chunk_index : i,
     });
 
     onProgress?.(i + 1, chunks.length);
