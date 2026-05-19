@@ -35,6 +35,7 @@ export type SourceTypeFilter = 'official' | 'press' | 'competitive' | 'ugc' | nu
  * matching catches what embedding similarity misses.
  */
 export async function vectorSearch(
+  export async function vectorSearch(
   queryEmbedding    : number[],
   mode              : Mode,
   matchCount        : number = 8,
@@ -44,10 +45,11 @@ export async function vectorSearch(
 ): Promise<DocumentChunk[]> {
   const { data, error } = await supabase.rpc('match_documents', {
     query_embedding    : queryEmbedding,
-    query_text         : queryText,          // NEW — enables BM25 hybrid scoring
+    query_text         : queryText,
     match_count        : matchCount,
-    filter             : { mode },           // v2 RPC uses filter jsonb, not match_mode
-    source_type_filter : sourceTypeFilter,   // NEW — filter by knowledge tier
+    match_threshold    : matchThreshold,
+    filter             : { mode },
+    source_type_filter : sourceTypeFilter,
   });
 
   if (error) {
