@@ -6,7 +6,7 @@
 import { useState, useEffect, type ChangeEvent } from 'react';
 import { ingestDocument } from '../lib/ingestion';
 import { fetchAllDocuments, deleteDocumentBySource } from '../lib/supabase';
-import type { DocumentRecord, IngestionForm, Mode } from '../types';
+import type { DocumentRecord, IngestionForm, Mode, SourceType } from '../types';
 
 const ADMIN_PASSWORD = 'leela2026';
 
@@ -682,7 +682,7 @@ export function AdminPanel() {
                     <select
                       value={form.sourceType}
                       onChange={(e: ChangeEvent<HTMLSelectElement>) =>
-                        setForm({ ...form, sourceType: e.target.value })
+                        setForm({ ...form, sourceType: e.target.value as SourceType })
                       }
                       style={{ ...inputStyle, cursor: 'pointer' }}
                       onFocus={(e) => { e.currentTarget.style.borderColor = '#21469F'; }}
