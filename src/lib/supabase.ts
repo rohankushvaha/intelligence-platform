@@ -35,7 +35,6 @@ export type SourceTypeFilter = 'official' | 'press' | 'competitive' | 'ugc' | nu
  * matching catches what embedding similarity misses.
  */
 export async function vectorSearch(
-  export async function vectorSearch(
   queryEmbedding    : number[],
   mode              : Mode,
   matchCount        : number = 8,
