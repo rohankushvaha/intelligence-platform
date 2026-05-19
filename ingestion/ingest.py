@@ -22,6 +22,7 @@ import argparse
 import hashlib
 import json
 import logging
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -48,6 +49,7 @@ from config import (
     CHUNK_SIZE,
     CHUNK_OVERLAP,
     LANGSMITH_PROJECT,
+    MIN_CHUNK_QUALITY_SCORE,
 )
 
 logging.basicConfig(
@@ -77,16 +79,12 @@ def _require_env(key: str) -> str:
 def init_clients() -> tuple[FirecrawlApp, SupabaseClient, SentenceTransformer]:
     log.info("Initialising clients…")
 
-    # Firecrawl — handles JS, proxies, bot protection automatically
-    firecrawl = FirecrawlApp(api_key=_require_env("FIRECRAWL_API_KEY"))
-
-    # Supabase — pgvector database
-    supabase = create_client(
+    firecrawl   = FirecrawlApp(api_key=_require_env("FIRECRAWL_API_KEY"))
+    supabase    = create_client(
         _require_env("SUPABASE_URL"),
         _require_env("SUPABASE_SERVICE_KEY"),
     )
 
-    # Embedding model — same as v1, 384 dims
     log.info("Loading embedding model…")
     embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
@@ -100,42 +98,29 @@ def init_clients() -> tuple[FirecrawlApp, SupabaseClient, SentenceTransformer]:
 
 @traceable(name="crawl_source")
 def crawl_source(
-    firecrawl: FirecrawlApp,
-    source   : IngestionSource,
-    dry_run  : bool = False,
+    firecrawl : FirecrawlApp,
+    source    : IngestionSource,
+    dry_run   : bool = False,
 ) -> list[dict]:
-    """
-    Crawl a source URL using Firecrawl.
-    Firecrawl handles everything: JS rendering, bot detection,
-    proxy rotation, clean markdown output. One API call per source.
-    """
     if dry_run:
         log.info(f"[DRY RUN] Skipping crawl for {source.name}")
-        return [{"url": source.url, "markdown": "# Dry run placeholder", "title": "Dry Run"}]
+        return [{"url": source.url, "markdown": "# Dry run placeholder content for testing the pipeline.", "title": "Dry Run"}]
 
     log.info(f"[CRAWL] {source.name} → {source.url}")
 
     params: dict = {
         "limit"        : source.max_pages,
-        "scrapeOptions": {
-            "formats": ["markdown"],
-        },
+        "scrapeOptions": {"formats": ["markdown"]},
     }
 
-    # Restrict crawl to matching URL patterns — saves credits
     if source.url_patterns:
         params["includePaths"] = source.url_patterns
 
     try:
         result = firecrawl.crawl_url(source.url, params=params)
 
-        # Handle both dict and object response formats
-        if isinstance(result, dict):
-            pages = result.get("data", [])
-        else:
-            pages = getattr(result, "data", []) or []
+        pages = result.get("data", []) if isinstance(result, dict) else (getattr(result, "data", []) or [])
 
-        # Normalise page format
         normalised = []
         for page in pages:
             if isinstance(page, dict):
@@ -148,22 +133,171 @@ def crawl_source(
                 url      = metadata.get("sourceURL", source.url)
                 title    = metadata.get("title", source.name)
 
-            if len(markdown.strip()) > 50:
+            # Clean the markdown BEFORE checking length
+            # Raw Firecrawl markdown contains image CDN URLs, date pickers,
+            # booking widgets, and nav chrome — clean it first
+            cleaned = clean_markdown(markdown)
+
+            if len(cleaned.strip()) > 100:
                 normalised.append({
                     "url"     : url,
-                    "markdown": markdown.strip(),
+                    "markdown": cleaned,
                     "title"   : title,
                 })
+            else:
+                log.debug(f"[CRAWL] Skipped page with insufficient content after cleaning: {url}")
 
-        log.info(f"[CRAWL] ✓ {len(normalised)} pages from {source.name}")
-
-        # Polite delay — Firecrawl free tier allows 3 req/min
-        time.sleep(25)
+        log.info(f"[CRAWL] ✓ {len(normalised)} usable pages from {source.name}")
+        time.sleep(25)  # Polite delay — Firecrawl free tier: 3 req/min
         return normalised
 
     except Exception as exc:
         log.error(f"[CRAWL] ✗ {source.name} failed: {exc}")
         return []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  CONTENT CLEANING  ← THE KEY FIX
+# ══════════════════════════════════════════════════════════════════════════
+
+def clean_markdown(text: str) -> str:
+    """
+    Strip UI chrome from Firecrawl markdown output before chunking.
+
+    Firecrawl returns clean markdown but hotel/travel websites are full of:
+    - Image CDN URLs embedded as markdown images
+    - Date picker widgets (S M T W T F S / 1 2 3 4 5 6 7 ...)
+    - Booking widgets (1 Guest / 1 Room / Check-in Check-out)
+    - Navigation breadcrumbs and skip links
+    - Social share buttons
+    - Cookie consent banners
+    - Repetitive footer links
+
+    After cleaning, only human-readable prose content remains — which is
+    what the LLM actually needs to answer questions.
+    """
+
+    # 1. Remove markdown images entirely — ![alt](url)
+    #    These are CDN image URLs that add zero semantic value
+    text = re.sub(r'!\[.*?\]\(https?://[^\)]+\)', '', text)
+
+    # 2. Remove bare CDN/image URLs on their own lines
+    text = re.sub(r'^https?://(?:cdn\.|images\.|static\.|assets\.).*$', '', text, flags=re.MULTILINE)
+
+    # 3. Remove markdown links but KEEP the link text — [text](url) → text
+    #    Exception: keep links that are clearly navigation (skip to content etc)
+    text = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', text)
+
+    # 4. Remove "Skip to main content" and similar accessibility nav lines
+    text = re.sub(r'^Skip to.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
+
+    # 5. Remove date picker widgets — lines that are just calendar headers/numbers
+    #    Pattern: lines containing only S M T W T F S or sequences of numbers
+    text = re.sub(r'^[SMTWF\s\d]+$', '', text, flags=re.MULTILINE)
+
+    # 6. Remove booking widget lines
+    booking_patterns = [
+        r'^\d+\s*Guest[s]?\s*$',
+        r'^\d+\s*Room[s]?\s*$',
+        r'^Check[- ]?in\s*$',
+        r'^Check[- ]?out\s*$',
+        r'^Check Availability\s*$',
+        r'^Book Now\s*$',
+        r'^SELECT DATES\s*$',
+        r'^\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\s*$',
+    ]
+    for pattern in booking_patterns:
+        text = re.sub(pattern, '', text, flags=re.MULTILINE | re.IGNORECASE)
+
+    # 7. Remove social share / utility button lines
+    social_patterns = [
+        r'^SHARE\s*$',
+        r'^SHARE\s+[\w\s]+$',
+        r'^Follow\s+(?:us|on)\s*$',
+        r'^Subscribe\s*$',
+        r'^Newsletter\s*$',
+        r'^Cookie\s+(?:Policy|Settings|Consent)\s*$',
+        r'^Accept\s+(?:All\s+)?Cookies\s*$',
+    ]
+    for pattern in social_patterns:
+        text = re.sub(pattern, '', text, flags=re.MULTILINE | re.IGNORECASE)
+
+    # 8. Remove lines that are just separators or horizontal rules
+    text = re.sub(r'^[\s\*\-_=]{3,}\s*$', '', text, flags=re.MULTILINE)
+
+    # 9. Remove lines that are pure punctuation or symbols
+    text = re.sub(r'^[^\w\s]{1,5}\s*$', '', text, flags=re.MULTILINE)
+
+    # 10. Collapse 3+ consecutive blank lines into 2
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    # 11. Strip leading/trailing whitespace per line
+    lines = [line.strip() for line in text.split('\n')]
+
+    # 12. Final filter — remove lines that are too short to be meaningful
+    #     (less than 20 chars and not a heading) — catches nav remnants
+    cleaned_lines = []
+    for line in lines:
+        is_heading   = line.startswith('#')
+        is_long      = len(line) >= 20
+        is_empty     = len(line) == 0
+        if is_heading or is_long or is_empty:
+            cleaned_lines.append(line)
+
+    return '\n'.join(cleaned_lines).strip()
+
+
+def quality_score(text: str) -> float:
+    """
+    Score a chunk 0.0–1.0 based on content quality signals.
+
+    High score = dense prose with real hospitality information.
+    Low score  = nav chrome, image URLs, repetitive boilerplate.
+
+    Used to filter out chunks that slipped through cleaning.
+    """
+    if not text or len(text) < 50:
+        return 0.0
+
+    words        = text.split()
+    total_words  = len(words)
+
+    if total_words < 10:
+        return 0.0
+
+    # Signal 1: ratio of alphabetic words to total words
+    alpha_words  = sum(1 for w in words if re.match(r'^[a-zA-Z]{2,}', w))
+    alpha_ratio  = alpha_words / total_words
+
+    # Signal 2: average word length (URLs and nav chrome have short tokens)
+    avg_word_len = sum(len(w) for w in words) / total_words
+
+    # Signal 3: sentence-like structure (contains periods or commas)
+    has_sentences = bool(re.search(r'[.,;:!?]', text))
+
+    # Signal 4: hospitality keyword density — these words = good content
+    hospitality_keywords = {
+        'hotel', 'palace', 'resort', 'suite', 'room', 'spa', 'dining',
+        'restaurant', 'pool', 'gym', 'wedding', 'banquet', 'conference',
+        'leela', 'luxury', 'guest', 'service', 'amenity', 'amenities',
+        'breakfast', 'check', 'property', 'location', 'view', 'garden',
+        'award', 'heritage', 'culture', 'experience', 'stay', 'offer',
+        'revenue', 'investor', 'financial', 'annual', 'report', 'growth',
+        'taj', 'oberoi', 'itc', 'competitive', 'market', 'brand',
+    }
+    text_lower   = text.lower()
+    kw_hits      = sum(1 for kw in hospitality_keywords if kw in text_lower)
+    kw_score     = min(kw_hits / 5, 1.0)  # cap at 1.0 after 5 keyword hits
+
+    # Combine signals
+    score = (
+        alpha_ratio  * 0.4 +
+        min(avg_word_len / 8, 1.0) * 0.2 +
+        (0.2 if has_sentences else 0.0) +
+        kw_score     * 0.2
+    )
+
+    return round(score, 3)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -179,26 +313,33 @@ _splitter = RecursiveCharacterTextSplitter(
 
 
 def _stable_id(url: str, chunk_index: int) -> str:
-    """
-    Deterministic UUID from URL + chunk position.
-    UUID5 always produces a valid UUID format (with dashes).
-    Same input always = same UUID = safe idempotent upsert.
-    """
     import uuid
     name = f"{url}::{chunk_index}"
     return str(uuid.uuid5(uuid.NAMESPACE_URL, name))
 
 
 def chunk_pages(pages: list[dict], source: IngestionSource) -> Iterator[dict]:
+    skipped_quality = 0
+    total_chunks    = 0
+
     for page in pages:
         raw_text = page.get("markdown", "").strip()
         page_url = page.get("url", source.url)
         title    = page.get("title", source.name)
 
-        if not raw_text or len(raw_text) < 50:
+        if not raw_text or len(raw_text) < 100:
             continue
 
         for idx, chunk_text in enumerate(_splitter.split_text(raw_text)):
+            total_chunks += 1
+
+            # Quality gate — skip junk chunks that slipped through cleaning
+            score = quality_score(chunk_text)
+            if score < MIN_CHUNK_QUALITY_SCORE:
+                skipped_quality += 1
+                log.debug(f"[CHUNK] Skipped low-quality chunk (score={score:.2f}): {chunk_text[:80]!r}")
+                continue
+
             yield {
                 "id"           : _stable_id(page_url, idx),
                 "content"      : chunk_text,
@@ -209,7 +350,12 @@ def chunk_pages(pages: list[dict], source: IngestionSource) -> Iterator[dict]:
                 "property_name": source.property_name,
                 "chunk_index"  : idx,
                 "page_title"   : title,
+                "quality_score": score,
             }
+
+    if total_chunks:
+        kept = total_chunks - skipped_quality
+        log.info(f"[CHUNK] Quality filter: kept {kept}/{total_chunks} chunks ({skipped_quality} skipped)")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -217,7 +363,7 @@ def chunk_pages(pages: list[dict], source: IngestionSource) -> Iterator[dict]:
 # ══════════════════════════════════════════════════════════════════════════
 
 def embed_chunks(
-    chunks    : list[dict],
+    chunks     : list[dict],
     embed_model: SentenceTransformer,
     batch_size : int = 32,
 ) -> list[dict]:
@@ -316,7 +462,7 @@ def run_pipeline(
 
         chunks = list(chunk_pages(pages, source))
         summary["total_chunks"] += len(chunks)
-        log.info(f"[CHUNK] {len(chunks)} chunks from {len(pages)} pages")
+        log.info(f"[CHUNK] {len(chunks)} quality chunks from {len(pages)} pages")
 
         if dry_run:
             continue
@@ -353,7 +499,7 @@ def main() -> None:
 
     if args.list_sources:
         for s in SOURCES:
-            print(f"  [{s.source_type:>12}] {s.name}")
+            print(f"  [{s.source_type:>12}] {s.name} — {s.url}")
         sys.exit(0)
 
     sources = list(SOURCES)
