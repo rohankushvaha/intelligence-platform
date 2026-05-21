@@ -1,27 +1,18 @@
 """
 LIP v2 — Leela Intelligence Platform
-Core Ingestion Pipeline
+Core Ingestion Pipeline (Firecrawl edition)
 ─────────────────────────────────────────────────────────────────────────────
-What this script does (in order):
-  1. Loads every source defined in config.py
-  2. Crawls each source URL using the Firecrawl API (markdown output)
-  3. Chunks the markdown into overlapping text windows
-  4. Embeds each chunk using HuggingFace all-MiniLM-L6-v2 (same model as v1)
-  5. Upserts into Supabase pgvector — skips chunks already in the DB
-  6. Logs every step to LangSmith for observability
+Firecrawl handles JS rendering, bot protection, and proxy rotation
+automatically — this is why it works on theleela.com where Crawl4AI failed.
+
+Free tier: 500 credits (1 credit = 1 page). ~100 credits per full run.
+Upgrade to Hobby ($16/month) for 3,000 credits/month for weekly automation.
 
 Run:
-  python ingest.py                  # all sources
-  python ingest.py --source-type official   # only Tier 1
-  python ingest.py --dry-run        # scrape + chunk, skip embed + upsert
-  python ingest.py --source "The Leela — Dining"  # one source by name
-
-Prerequisites:
-  pip install firecrawl-py langchain langchain-community \
-              sentence-transformers supabase python-dotenv \
-              langsmith tiktoken
-
-  Copy .env.example to .env and fill in all values.
+  python ingest.py --source-type official    # Tier 1 — Leela official
+  python ingest.py --source-type competitive # Tier 3 — competitor intel
+  python ingest.py --dry-run                 # test without writing to DB
+  python ingest.py --list-sources            # see all sources
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -31,6 +22,7 @@ import argparse
 import hashlib
 import json
 import logging
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -39,8 +31,10 @@ from typing import Iterator
 from dotenv import load_dotenv
 import os
 
-# Load .env first — all env vars must be available before importing clients
 load_dotenv()
+
+os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+os.environ.setdefault("LANGCHAIN_PROJECT", "lip-v2-ingestion")
 
 from firecrawl import FirecrawlApp
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -52,21 +46,19 @@ from config import (
     SOURCES,
     IngestionSource,
     SUPABASE_TABLE,
-    EMBEDDING_DIM,
     CHUNK_SIZE,
     CHUNK_OVERLAP,
-    FIRECRAWL_DELAY_SECONDS,
     LANGSMITH_PROJECT,
+    MIN_CHUNK_QUALITY_SCORE,
 )
 
-# ── Logging setup ──────────────────────────────────────────────────────────
 logging.basicConfig(
     level   = logging.INFO,
     format  = "%(asctime)s | %(levelname)-8s | %(message)s",
     datefmt = "%Y-%m-%d %H:%M:%S",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("ingestion.log"),   # always keep a local log
+        logging.FileHandler("ingestion.log"),
     ],
 )
 log = logging.getLogger("lip.ingest")
@@ -77,7 +69,6 @@ log = logging.getLogger("lip.ingest")
 # ══════════════════════════════════════════════════════════════════════════
 
 def _require_env(key: str) -> str:
-    """Fail fast if a required environment variable is missing."""
     value = os.getenv(key)
     if not value:
         log.error(f"Missing required environment variable: {key}")
@@ -86,31 +77,16 @@ def _require_env(key: str) -> str:
 
 
 def init_clients() -> tuple[FirecrawlApp, SupabaseClient, SentenceTransformer]:
-    """
-    Initialise all external service clients.
-    Returns (firecrawl, supabase, embedding_model).
-    """
     log.info("Initialising clients…")
 
-    # Firecrawl — Free tier: 1,000 credits/month (1 credit per page scrape)
-    firecrawl = FirecrawlApp(api_key=_require_env("FIRECRAWL_API_KEY"))
-
-    # Supabase — existing v1 project
-    supabase = create_client(
+    firecrawl   = FirecrawlApp(api_key=_require_env("FIRECRAWL_API_KEY"))
+    supabase    = create_client(
         _require_env("SUPABASE_URL"),
-        _require_env("SUPABASE_SERVICE_KEY"),   # use service key for writes
+        _require_env("SUPABASE_SERVICE_KEY"),
     )
 
-    # HuggingFace embedding model — same as v1 for vector dimension parity
-    # Downloads ~90MB on first run, cached locally afterwards.
-    log.info("Loading embedding model (all-MiniLM-L6-v2)…")
+    log.info("Loading embedding model…")
     embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-
-    # LangSmith — set env vars so @traceable decorator auto-connects
-    # Free Developer tier: 5,000 traces/month, 14-day retention
-    os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
-    os.environ.setdefault("LANGCHAIN_PROJECT", LANGSMITH_PROJECT)
-    # LANGCHAIN_API_KEY must be in .env
 
     log.info("All clients ready.")
     return firecrawl, supabase, embed_model
@@ -122,105 +98,250 @@ def init_clients() -> tuple[FirecrawlApp, SupabaseClient, SentenceTransformer]:
 
 @traceable(name="crawl_source")
 def crawl_source(
-    firecrawl: FirecrawlApp,
-    source: IngestionSource,
-    dry_run: bool = False,
+    firecrawl : FirecrawlApp,
+    source    : IngestionSource,
+    dry_run   : bool = False,
 ) -> list[dict]:
-    """
-    Crawl a single source URL and return a list of page dicts.
+    if dry_run:
+        log.info(f"[DRY RUN] Skipping crawl for {source.name}")
+        return [{"url": source.url, "markdown": "# Dry run placeholder content for testing the pipeline.", "title": "Dry Run"}]
 
-    Each page dict contains:
-      - url      : str
-      - markdown : str   (Firecrawl converts HTML → clean markdown)
-      - title    : str
-
-    Firecrawl handles JS rendering, bot detection, and robots.txt respect
-    automatically — critical for The Leela's Drupal/PHP site.
-    """
     log.info(f"[CRAWL] {source.name} → {source.url}")
 
-    if dry_run:
-        log.info("[DRY RUN] Skipping actual crawl — returning mock data.")
-        return [{"url": source.url, "markdown": "# Dry run placeholder", "title": "Dry Run"}]
-
-    crawl_params: dict = {
+    params: dict = {
         "limit"        : source.max_pages,
         "scrapeOptions": {"formats": ["markdown"]},
     }
 
-    # If url_patterns are specified, restrict the crawl to matching paths.
-    # This is the primary way we control credit spend — never crawl the
-    # entire site if only subsections are relevant.
     if source.url_patterns:
-        crawl_params["includePaths"] = source.url_patterns
+        params["includePaths"] = source.url_patterns
 
     try:
-        # crawl() blocks until complete and returns all pages.
-        # For large sites this could take minutes — that's expected.
-        result = firecrawl.crawl_url(source.url, params=crawl_params)
-        pages  = result.get("data", [])
-        log.info(f"[CRAWL] ✓ {len(pages)} pages scraped from {source.name}")
+        result = firecrawl.crawl_url(source.url, params=params)
 
-        # Polite delay — respect Firecrawl's free-tier rate limit
-        time.sleep(FIRECRAWL_DELAY_SECONDS)
-        return pages
+        pages = result.get("data", []) if isinstance(result, dict) else (getattr(result, "data", []) or [])
+
+        normalised = []
+        for page in pages:
+            if isinstance(page, dict):
+                markdown = page.get("markdown", "") or ""
+                url      = page.get("metadata", {}).get("sourceURL", source.url)
+                title    = page.get("metadata", {}).get("title", source.name)
+            else:
+                markdown = getattr(page, "markdown", "") or ""
+                metadata = getattr(page, "metadata", {}) or {}
+                url      = metadata.get("sourceURL", source.url)
+                title    = metadata.get("title", source.name)
+
+            # Clean the markdown BEFORE checking length
+            # Raw Firecrawl markdown contains image CDN URLs, date pickers,
+            # booking widgets, and nav chrome — clean it first
+            cleaned = clean_markdown(markdown)
+
+            if len(cleaned.strip()) > 100:
+                normalised.append({
+                    "url"     : url,
+                    "markdown": cleaned,
+                    "title"   : title,
+                })
+            else:
+                log.debug(f"[CRAWL] Skipped page with insufficient content after cleaning: {url}")
+
+        log.info(f"[CRAWL] ✓ {len(normalised)} usable pages from {source.name}")
+        time.sleep(25)  # Polite delay — Firecrawl free tier: 3 req/min
+        return normalised
 
     except Exception as exc:
-        # Log but don't crash — a single bad source shouldn't abort the run
-        log.error(f"[CRAWL] ✗ Failed for {source.name}: {exc}")
+        log.error(f"[CRAWL] ✗ {source.name} failed: {exc}")
         return []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  CONTENT CLEANING  ← THE KEY FIX
+# ══════════════════════════════════════════════════════════════════════════
+
+def clean_markdown(text: str) -> str:
+    """
+    Strip UI chrome from Firecrawl markdown output before chunking.
+
+    Firecrawl returns clean markdown but hotel/travel websites are full of:
+    - Image CDN URLs embedded as markdown images
+    - Date picker widgets (S M T W T F S / 1 2 3 4 5 6 7 ...)
+    - Booking widgets (1 Guest / 1 Room / Check-in Check-out)
+    - Navigation breadcrumbs and skip links
+    - Social share buttons
+    - Cookie consent banners
+    - Repetitive footer links
+
+    After cleaning, only human-readable prose content remains — which is
+    what the LLM actually needs to answer questions.
+    """
+
+    # 1. Remove markdown images entirely — ![alt](url)
+    #    These are CDN image URLs that add zero semantic value
+    text = re.sub(r'!\[.*?\]\(https?://[^\)]+\)', '', text)
+
+    # 2. Remove bare CDN/image URLs on their own lines
+    text = re.sub(r'^https?://(?:cdn\.|images\.|static\.|assets\.).*$', '', text, flags=re.MULTILINE)
+
+    # 3. Remove markdown links but KEEP the link text — [text](url) → text
+    #    Exception: keep links that are clearly navigation (skip to content etc)
+    text = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', text)
+
+    # 4. Remove "Skip to main content" and similar accessibility nav lines
+    text = re.sub(r'^Skip to.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
+
+    # 5. Remove date picker widgets — lines that are just calendar headers/numbers
+    #    Pattern: lines containing only S M T W T F S or sequences of numbers
+    text = re.sub(r'^[SMTWF\s\d]+$', '', text, flags=re.MULTILINE)
+
+    # 6. Remove booking widget lines
+    booking_patterns = [
+        r'^\d+\s*Guest[s]?\s*$',
+        r'^\d+\s*Room[s]?\s*$',
+        r'^Check[- ]?in\s*$',
+        r'^Check[- ]?out\s*$',
+        r'^Check Availability\s*$',
+        r'^Book Now\s*$',
+        r'^SELECT DATES\s*$',
+        r'^\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\s*$',
+    ]
+    for pattern in booking_patterns:
+        text = re.sub(pattern, '', text, flags=re.MULTILINE | re.IGNORECASE)
+
+    # 7. Remove social share / utility button lines
+    social_patterns = [
+        r'^SHARE\s*$',
+        r'^SHARE\s+[\w\s]+$',
+        r'^Follow\s+(?:us|on)\s*$',
+        r'^Subscribe\s*$',
+        r'^Newsletter\s*$',
+        r'^Cookie\s+(?:Policy|Settings|Consent)\s*$',
+        r'^Accept\s+(?:All\s+)?Cookies\s*$',
+    ]
+    for pattern in social_patterns:
+        text = re.sub(pattern, '', text, flags=re.MULTILINE | re.IGNORECASE)
+
+    # 8. Remove lines that are just separators or horizontal rules
+    text = re.sub(r'^[\s\*\-_=]{3,}\s*$', '', text, flags=re.MULTILINE)
+
+    # 9. Remove lines that are pure punctuation or symbols
+    text = re.sub(r'^[^\w\s]{1,5}\s*$', '', text, flags=re.MULTILINE)
+
+    # 10. Collapse 3+ consecutive blank lines into 2
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    # 11. Strip leading/trailing whitespace per line
+    lines = [line.strip() for line in text.split('\n')]
+
+    # 12. Final filter — remove lines that are too short to be meaningful
+    #     (less than 20 chars and not a heading) — catches nav remnants
+    cleaned_lines = []
+    for line in lines:
+        is_heading   = line.startswith('#')
+        is_long      = len(line) >= 20
+        is_empty     = len(line) == 0
+        if is_heading or is_long or is_empty:
+            cleaned_lines.append(line)
+
+    return '\n'.join(cleaned_lines).strip()
+
+
+def quality_score(text: str) -> float:
+    """
+    Score a chunk 0.0–1.0 based on content quality signals.
+
+    High score = dense prose with real hospitality information.
+    Low score  = nav chrome, image URLs, repetitive boilerplate.
+
+    Used to filter out chunks that slipped through cleaning.
+    """
+    if not text or len(text) < 50:
+        return 0.0
+
+    words        = text.split()
+    total_words  = len(words)
+
+    if total_words < 10:
+        return 0.0
+
+    # Signal 1: ratio of alphabetic words to total words
+    alpha_words  = sum(1 for w in words if re.match(r'^[a-zA-Z]{2,}', w))
+    alpha_ratio  = alpha_words / total_words
+
+    # Signal 2: average word length (URLs and nav chrome have short tokens)
+    avg_word_len = sum(len(w) for w in words) / total_words
+
+    # Signal 3: sentence-like structure (contains periods or commas)
+    has_sentences = bool(re.search(r'[.,;:!?]', text))
+
+    # Signal 4: hospitality keyword density — these words = good content
+    hospitality_keywords = {
+        'hotel', 'palace', 'resort', 'suite', 'room', 'spa', 'dining',
+        'restaurant', 'pool', 'gym', 'wedding', 'banquet', 'conference',
+        'leela', 'luxury', 'guest', 'service', 'amenity', 'amenities',
+        'breakfast', 'check', 'property', 'location', 'view', 'garden',
+        'award', 'heritage', 'culture', 'experience', 'stay', 'offer',
+        'revenue', 'investor', 'financial', 'annual', 'report', 'growth',
+        'taj', 'oberoi', 'itc', 'competitive', 'market', 'brand',
+    }
+    text_lower   = text.lower()
+    kw_hits      = sum(1 for kw in hospitality_keywords if kw in text_lower)
+    kw_score     = min(kw_hits / 5, 1.0)  # cap at 1.0 after 5 keyword hits
+
+    # Combine signals
+    score = (
+        alpha_ratio  * 0.4 +
+        min(avg_word_len / 8, 1.0) * 0.2 +
+        (0.2 if has_sentences else 0.0) +
+        kw_score     * 0.2
+    )
+
+    return round(score, 3)
 
 
 # ══════════════════════════════════════════════════════════════════════════
 #  STEP 2 — CHUNK
 # ══════════════════════════════════════════════════════════════════════════
 
-# Build the splitter once — it's stateless, safe to reuse.
 _splitter = RecursiveCharacterTextSplitter(
-    chunk_size        = CHUNK_SIZE,
-    chunk_overlap     = CHUNK_OVERLAP,
-    length_function   = len,
-    # Split on paragraph breaks first, then sentences, then words.
-    # This keeps semantically coherent ideas together.
-    separators        = ["\n\n", "\n", ". ", " ", ""],
+    chunk_size      = CHUNK_SIZE,
+    chunk_overlap   = CHUNK_OVERLAP,
+    length_function = len,
+    separators      = ["\n\n", "\n", ". ", " ", ""],
 )
 
 
-def chunk_pages(
-    pages : list[dict],
-    source: IngestionSource,
-) -> Iterator[dict]:
-    """
-    Split raw page markdown into overlapping chunks.
-    Yields one chunk record per chunk, ready to embed and upsert.
+def _stable_id(url: str, chunk_index: int) -> str:
+    import uuid
+    name = f"{url}::{chunk_index}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, name))
 
-    Why chunking matters for RAG:
-    ─────────────────────────────
-    Vector similarity works best when chunks are focused on one topic.
-    A 10,000-word property page has many distinct ideas: rooms, dining, spa,
-    location, history. If we embed the whole page, the vector is an average
-    of all those ideas — too diluted to surface in a targeted search.
-    Smaller chunks (≈512 tokens) keep each vector semantically sharp.
-    """
+
+def chunk_pages(pages: list[dict], source: IngestionSource) -> Iterator[dict]:
+    skipped_quality = 0
+    total_chunks    = 0
+
     for page in pages:
         raw_text = page.get("markdown", "").strip()
         page_url = page.get("url", source.url)
-        title    = page.get("metadata", {}).get("title", source.name)
+        title    = page.get("title", source.name)
 
-        if not raw_text or len(raw_text) < 50:
-            log.debug(f"[CHUNK] Skipping near-empty page: {page_url}")
+        if not raw_text or len(raw_text) < 100:
             continue
 
-        chunks = _splitter.split_text(raw_text)
-        log.debug(f"[CHUNK] {page_url} → {len(chunks)} chunks")
+        for idx, chunk_text in enumerate(_splitter.split_text(raw_text)):
+            total_chunks += 1
 
-        for idx, chunk_text in enumerate(chunks):
-            # Deterministic ID: if we re-ingest the same URL the same chunk
-            # always gets the same ID → Supabase upsert is idempotent.
-            chunk_id = _stable_id(page_url, idx)
+            # Quality gate — skip junk chunks that slipped through cleaning
+            score = quality_score(chunk_text)
+            if score < MIN_CHUNK_QUALITY_SCORE:
+                skipped_quality += 1
+                log.debug(f"[CHUNK] Skipped low-quality chunk (score={score:.2f}): {chunk_text[:80]!r}")
+                continue
 
             yield {
-                "id"           : chunk_id,
+                "id"           : _stable_id(page_url, idx),
                 "content"      : chunk_text,
                 "source_name"  : source.name,
                 "source_url"   : page_url,
@@ -229,18 +350,12 @@ def chunk_pages(
                 "property_name": source.property_name,
                 "chunk_index"  : idx,
                 "page_title"   : title,
-                # embedding and sentiment_score filled in later steps
+                "quality_score": score,
             }
 
-
-def _stable_id(url: str, chunk_index: int) -> str:
-    """
-    Generate a deterministic UUID-like string from URL + chunk index.
-    Ensures that re-ingesting the same page updates existing rows (upsert)
-    rather than creating duplicates.
-    """
-    raw = f"{url}::{chunk_index}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:36]
+    if total_chunks:
+        kept = total_chunks - skipped_quality
+        log.info(f"[CHUNK] Quality filter: kept {kept}/{total_chunks} chunks ({skipped_quality} skipped)")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -252,98 +367,68 @@ def embed_chunks(
     embed_model: SentenceTransformer,
     batch_size : int = 32,
 ) -> list[dict]:
-    """
-    Add embedding vectors to chunk records.
-
-    We batch the encoding calls for efficiency. SentenceTransformer
-    handles batching internally but explicit batches let us log progress.
-
-    The all-MiniLM-L6-v2 model produces 384-dimensional vectors — the same
-    dimension as v1, so the existing Supabase column works without migration.
-    """
     texts = [c["content"] for c in chunks]
-    log.info(f"[EMBED] Encoding {len(texts)} chunks in batches of {batch_size}…")
+    log.info(f"[EMBED] Encoding {len(texts)} chunks…")
 
     all_vectors = []
     for i in range(0, len(texts), batch_size):
-        batch   = texts[i : i + batch_size]
-        vectors = embed_model.encode(batch, show_progress_bar=False).tolist()
+        vectors = embed_model.encode(
+            texts[i : i + batch_size],
+            show_progress_bar=False,
+        ).tolist()
         all_vectors.extend(vectors)
-        log.debug(f"[EMBED] Batch {i // batch_size + 1} done")
 
     for chunk, vector in zip(chunks, all_vectors):
-        chunk["embedding"] = vector  # list[float], length 384
+        chunk["embedding"] = vector
 
     log.info(f"[EMBED] ✓ {len(chunks)} chunks embedded")
     return chunks
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  STEP 4 — UPSERT TO SUPABASE
+#  STEP 4 — UPSERT
 # ══════════════════════════════════════════════════════════════════════════
 
 @traceable(name="upsert_to_supabase")
 def upsert_chunks(
-    supabase: SupabaseClient,
-    chunks  : list[dict],
+    supabase  : SupabaseClient,
+    chunks    : list[dict],
     batch_size: int = 50,
 ) -> int:
-    """
-    Upsert chunk records into the Supabase documents table.
-
-    Uses ON CONFLICT (id) DO UPDATE so re-ingesting the same content
-    refreshes text and embedding without creating duplicates.
-
-    Returns the count of successfully upserted rows.
-    """
     if not chunks:
-        log.warning("[UPSERT] No chunks to upsert — skipping.")
         return 0
 
-    now     = datetime.now(timezone.utc).isoformat()
+    now      = datetime.now(timezone.utc).isoformat()
     upserted = 0
 
     for i in range(0, len(chunks), batch_size):
         batch = chunks[i : i + batch_size]
-
-        # Build rows matching the Supabase schema (v1 + v2 new columns)
-        rows = [
-            {
-                "id"            : c["id"],
-                "content"       : c["content"],
-                "embedding"     : c["embedding"],        # vector(384)
-                "source_name"   : c["source_name"],
-                "source_url"    : c["source_url"],
-                "source_type"   : c["source_type"],      # NEW in v2
-                "mode"          : c["mode"],
-                "property_name" : c.get("property_name"), # NEW in v2
-                "chunk_index"   : c["chunk_index"],
-                "sentiment_score": c.get("sentiment_score"),  # NEW in v2 (optional)
-                "updated_at"    : now,
-                # created_at is set by Supabase default on INSERT
-            }
-            for c in batch
-        ]
+        rows  = [{
+            "id"             : c["id"],
+            "content"        : c["content"],
+            "embedding"      : c["embedding"],
+            "source_name"    : c["source_name"],
+            "source_url"     : c["source_url"],
+            "source_type"    : c["source_type"],
+            "mode"           : c["mode"],
+            "property_name"  : c.get("property_name"),
+            "chunk_index"    : c["chunk_index"],
+            "sentiment_score": c.get("sentiment_score"),
+            "updated_at"     : now,
+        } for c in batch]
 
         try:
-            response = (
-                supabase
-                .table(SUPABASE_TABLE)
-                .upsert(rows, on_conflict="id")
-                .execute()
-            )
+            supabase.table(SUPABASE_TABLE).upsert(rows, on_conflict="id").execute()
             upserted += len(batch)
             log.info(f"[UPSERT] ✓ Batch {i // batch_size + 1}: {len(batch)} rows")
-
         except Exception as exc:
-            log.error(f"[UPSERT] ✗ Batch {i // batch_size + 1} failed: {exc}")
-            # Continue — partial success is better than a full abort
+            log.error(f"[UPSERT] ✗ Batch failed: {exc}")
 
     return upserted
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  ORCHESTRATOR — ties all steps together
+#  ORCHESTRATOR
 # ══════════════════════════════════════════════════════════════════════════
 
 @traceable(name="run_ingestion_pipeline")
@@ -354,24 +439,20 @@ def run_pipeline(
     embed_model: SentenceTransformer,
     dry_run    : bool = False,
 ) -> dict:
-    """
-    Full ingestion pipeline for a list of sources.
-    Returns a summary dict for logging and downstream reporting.
-    """
-    start_time = time.time()
-    summary    = {
+    start   = time.time()
+    summary = {
         "total_sources"  : len(sources),
         "total_pages"    : 0,
         "total_chunks"   : 0,
         "total_upserted" : 0,
         "failed_sources" : [],
+        "crawler"        : "firecrawl",
     }
 
     for source in sources:
         log.info(f"\n{'─' * 60}")
         log.info(f"Source: {source.name} [{source.source_type}]")
 
-        # Step 1 — Crawl
         pages = crawl_source(firecrawl, source, dry_run=dry_run)
         summary["total_pages"] += len(pages)
 
@@ -379,25 +460,18 @@ def run_pipeline(
             summary["failed_sources"].append(source.name)
             continue
 
-        # Step 2 — Chunk
         chunks = list(chunk_pages(pages, source))
         summary["total_chunks"] += len(chunks)
-        log.info(f"[CHUNK] {source.name} → {len(chunks)} total chunks")
+        log.info(f"[CHUNK] {len(chunks)} quality chunks from {len(pages)} pages")
 
         if dry_run:
-            log.info("[DRY RUN] Skipping embed + upsert.")
             continue
 
-        # Step 3 — Embed
         chunks = embed_chunks(chunks, embed_model)
+        summary["total_upserted"] += upsert_chunks(supabase, chunks)
 
-        # Step 4 — Upsert
-        n = upsert_chunks(supabase, chunks)
-        summary["total_upserted"] += n
-
-    elapsed = round(time.time() - start_time, 1)
-    summary["elapsed_seconds"] = elapsed
-    summary["run_at"] = datetime.now(timezone.utc).isoformat()
+    summary["elapsed_seconds"] = round(time.time() - start, 1)
+    summary["run_at"]          = datetime.now(timezone.utc).isoformat()
 
     log.info(f"\n{'═' * 60}")
     log.info("INGESTION COMPLETE")
@@ -408,73 +482,36 @@ def run_pipeline(
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  CLI ENTRYPOINT
+#  CLI
 # ══════════════════════════════════════════════════════════════════════════
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="LIP v2 — Leela Intelligence Platform ingestion pipeline"
-    )
-    parser.add_argument(
-        "--source-type",
-        choices=["official", "press", "competitive", "ugc"],
-        help="Run only sources of this type (e.g. official)",
-    )
-    parser.add_argument(
-        "--source",
-        type=str,
-        help="Run only the source with this exact name",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Crawl and chunk but skip embedding and Supabase upsert",
-    )
-    parser.add_argument(
-        "--list-sources",
-        action="store_true",
-        help="Print all configured sources and exit",
-    )
-    return parser.parse_args()
+    p = argparse.ArgumentParser(description="LIP v2 ingestion pipeline")
+    p.add_argument("--source-type", choices=["official", "press", "competitive", "ugc"])
+    p.add_argument("--source", type=str)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--list-sources", action="store_true")
+    return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
 
-    # ── List mode ──────────────────────────────────────────────────────────
     if args.list_sources:
-        print(f"\n{'─' * 60}")
-        print(f"{'LIP v2 — Configured Sources':^60}")
-        print(f"{'─' * 60}")
         for s in SOURCES:
-            flag = "✓" if s.source_type == "official" else "○"
-            print(f"  {flag} [{s.source_type:>12}] {s.name}")
-        print(f"{'─' * 60}\n")
+            print(f"  [{s.source_type:>12}] {s.name} — {s.url}")
         sys.exit(0)
 
-    # ── Filter sources ─────────────────────────────────────────────────────
-    sources = SOURCES
-
+    sources = list(SOURCES)
     if args.source_type:
         sources = [s for s in sources if s.source_type == args.source_type]
-        log.info(f"Filtered to source_type='{args.source_type}': {len(sources)} sources")
-
     if args.source:
         sources = [s for s in sources if s.name == args.source]
-        if not sources:
-            log.error(f"No source found with name: '{args.source}'")
-            sys.exit(1)
-
     if not sources:
-        log.error("No sources matched the given filters. Exiting.")
+        log.error("No sources matched.")
         sys.exit(1)
 
-    if args.dry_run:
-        log.info("DRY RUN mode — no data will be written to Supabase.")
-
-    # ── Initialise and run ─────────────────────────────────────────────────
     firecrawl, supabase, embed_model = init_clients()
-
     run_pipeline(
         sources     = sources,
         firecrawl   = firecrawl,
