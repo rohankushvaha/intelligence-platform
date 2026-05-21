@@ -179,7 +179,7 @@ export async function* streamWithContext(
         { role: 'user', content: userMessage },
       ],
       temperature: 0.3,
-      max_tokens : 2048,  // increased from 1024 — prevents truncated responses
+      max_tokens : 2048,
       stream     : true,
     }),
   });
@@ -196,7 +196,9 @@ export async function* streamWithContext(
     const { done, value } = await reader.read();
     if (done) break;
 
-    const chunk = decoder.split('\n').filter((line: string) => line.startsWith('data: '));
+    // Decode the buffer first, then split into lines
+    const chunk = decoder.decode(value);
+    const lines = chunk.split('\n').filter((line: string) => line.startsWith('data: '));
 
     for (const line of lines) {
       const data = line.slice(6);
