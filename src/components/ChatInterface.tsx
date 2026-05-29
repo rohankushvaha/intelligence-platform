@@ -16,7 +16,6 @@ import { MessageBubble }    from './MessageBubble';
 import { TypingIndicator }  from './TypingIndicator';
 import { ConciergeCardGrid, type ConciergeCardConfig } from './ConciergeCard';
 import { ContextStrip }     from './ContextStrip';
-import { TrustPanel }       from './TrustPanel';
 import { useRetrieval }     from '../hooks/useRetrieval';
 import { useChatStore }     from '../hooks/useChat';
 import type { Mode, SourceFilter } from '../types';
