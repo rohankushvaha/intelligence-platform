@@ -146,7 +146,7 @@ function LIPLayout() {
             textAlign     : 'center',
           }}
         >
-          Leela Intelligence Platform v2 · Built by Rohan Kushvaha
+          Leela Intelligence Platform · Built by Rohan Kushvaha
         </p>
       </footer>
     </div>
