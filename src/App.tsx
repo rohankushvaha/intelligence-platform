@@ -67,7 +67,7 @@ function LeelaOS() {
   const [appState,   setAppState]   = useState<AppState>('landing');
   const [activeNav,  setActiveNav]  = useState('concierge');
   const [activeMode, setActiveMode] = useState<Exclude<Mode, 'internal'>>('guest');
-  const [firstQuery, setFirstQuery] = useState('');
+  const [_firstQuery, setFirstQuery] = useState('');
 
   const handleHeroQuery = (query: string) => {
     setFirstQuery(query);
@@ -442,7 +442,7 @@ function KBRibbon() {
         { text: '3,236 Sources',         val: true },
         { text: '98% Official Content',  val: true },
         { text: 'Updated 3 mins ago'              },
-      ].map((item, i, arr) => (
+      ].map((item, i) => (
         <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
           {i > 0 && (
             <div style={{ width: '1px', height: '10px', background: 'rgba(191,161,107,0.12)' }} />
