@@ -57,7 +57,7 @@ function buildUserMessage(query: string, context: string): string {
   if (context) {
     return [
       'KNOWLEDGE BASE CONTEXT:',
-      '(Excerpts from The Leela\'s official knowledge base. Each tagged with property and source. Use this to answer the guest.)',
+      "(Excerpts from The Leela's official knowledge base. Each tagged with property and source. Use this to answer the guest.)",
       '',
       context,
       '',
@@ -69,7 +69,7 @@ function buildUserMessage(query: string, context: string): string {
   return [
     `GUEST: ${query}`,
     '',
-    '(No specific knowledge base matches found. Draw on your knowledge of The Leela collection.',
+    "(No specific knowledge base matches found. Draw on your knowledge of The Leela collection.",
     'Only refer to reservations for live availability or pricing.)',
   ].join('\n');
 }
